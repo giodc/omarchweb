@@ -8,8 +8,8 @@ import "Model.js" as Model
 
 Panel {
   id: root
-  moduleName: "giodc.omarchweb"
-  ipcTarget: "giodc.omarchweb"
+  moduleName: "io.github.giodc.omarchweb"
+  ipcTarget: "io.github.giodc.omarchweb"
   manageIpc: false
 
   property var anchorItem: null

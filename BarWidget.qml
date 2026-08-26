@@ -2,7 +2,7 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 
-// Bar entry point for OmarchWeb. A web/globe icon with a small status dot that
+// Bar entry point for OmarchWeb. A globe icon with a small status dot that
 // turns accent-colored while any managed web service is running. Clicking
 // opens the control panel (services / databases / virtual hosts).
 BarWidget {
@@ -27,8 +27,6 @@ BarWidget {
 
   // Shape contract for shell summon/hide/toggle routing.
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
-  readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
-
   function open() {
     if (panelLoader.item && panelLoader.item.open) panelLoader.item.open()
   }
@@ -38,6 +36,7 @@ BarWidget {
   function toggle() {
     if (panelLoader.item && panelLoader.item.toggle) panelLoader.item.toggle()
   }
+  readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
   function closeForPopoutSwitch() {
     if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
   }
@@ -64,10 +63,10 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: "󰖟"
-    tooltipText: "OmarchWeb"
     slotSize: Style.bar.statusSlot
     active: root.anyRunning
     useActiveColor: true
+    tooltipText: "OmarchWeb"
 
     onPressed: function(b) {
       if (b === Qt.MiddleButton) root.refresh()
