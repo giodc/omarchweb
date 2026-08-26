@@ -27,6 +27,8 @@ BarWidget {
 
   // Shape contract for shell summon/hide/toggle routing.
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
+  readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
+
   function open() {
     if (panelLoader.item && panelLoader.item.open) panelLoader.item.open()
   }
@@ -36,7 +38,6 @@ BarWidget {
   function toggle() {
     if (panelLoader.item && panelLoader.item.toggle) panelLoader.item.toggle()
   }
-  readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
   function closeForPopoutSwitch() {
     if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
   }
@@ -63,6 +64,7 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: "󰖟"
+    tooltipText: "OmarchWeb"
     slotSize: Style.bar.statusSlot
     active: root.anyRunning
     useActiveColor: true

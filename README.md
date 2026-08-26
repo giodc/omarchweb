@@ -1,98 +1,70 @@
-# OmarchWeb
+# OmarchWeb — Omarchy web development control panel
 
-A web development control panel for the Omarchy Quattro bar: start/stop/restart
-services, manage MySQL and PostgreSQL databases and app users, and add PHP,
-Laravel, WordPress, or Node virtual hosts.
+A native Omarchy bar plugin that manages your local web dev stack from the
+status bar: start/stop/restart services, create/delete databases, and add
+virtual hosts.
+
+## Features
+
+- **Services** — start / stop / restart PHP-FPM, MariaDB, Nginx (plus
+  PostgreSQL, Redis, and Mailpit if installed). Mailpit is an SMTP catcher
+  (port 1025) with a web UI on port 8025. Services are managed as systemd
+  units; privileged actions prompt through the desktop polkit agent (`pkexec`).
+- **MySQL / PostgreSQL** — separate tabs (shown only if that server is
+  installed) to list, create, and delete databases and app users. MySQL/MariaDB
+  uses the unix_socket account for the panel; create a password user for
+  WordPress and other apps (`localhost`). PostgreSQL uses peer auth for the
+  panel; password users connect at `127.0.0.1`.
+- **Virtual hosts** — add PHP, Laravel, WordPress, or Node Nginx vhosts and
+  remove them. WordPress vhosts download the latest release into the site
+  folder. Generated server blocks live under `/etc/nginx/sites-available|enabled`.
+- **One-shot setup** — installs and enables `php-fpm`, `mariadb`, `nginx`,
+  `composer`, and the Laravel installer when the stack is missing.
 
 ## Install
 
 ```sh
-omarchy plugin add https://github.com/giodc/omarchweb.git --enable
+omarchy plugin enable giodc.omarchweb right
 ```
 
-Or, for a local checkout under `~/.config/omarchy/plugins/`:
+The plugin lives in `~/.config/omarchy/plugins/giodc.omarchweb/` (symlinked at
+`~/Documents/Development/Plugins/OmarchWeb`). Saving any file under the plugin
+folder hot-reloads it; if a change doesn't apply, run
+`omarchy-shell shell rescanPlugins`.
 
-```sh
-omarchy plugin enable io.github.giodc.omarchweb
-omarchy bar move io.github.giodc.omarchweb --section right
-```
+## Settings
 
-Saved changes under the plugin folder hot-reload. If a change does not apply:
-
-```sh
-omarchy-shell shell rescanPlugins
-```
-
-## Usage
-
-Click the globe icon on the bar to open or close the panel. Press Escape to
-close it. Middle-click the bar icon to refresh.
-
-The panel opens on the **Services** tab. Other tabs:
-
-| Tab | Purpose |
-| --- | --- |
-| **Services** | Start / stop / restart / install / uninstall PHP-FPM, MariaDB, Nginx, PostgreSQL, Redis, Mailpit |
-| **MySQL** / **PostgreSQL** | List, create, and delete databases and password users (shown only if that server is installed) |
-| **Vhosts** | Add or remove PHP, Laravel, WordPress, or Node Nginx sites |
-
-Privileged actions (systemd, pacman, nginx, MariaDB elevation) prompt through
-the desktop polkit agent (`pkexec`). The bar process has no TTY, so plain
-`sudo` cannot ask for a password.
-
-### Mailpit
-
-SMTP catcher on port **1025**, web UI on **http://127.0.0.1:8025**. Install from
-Services (AUR `mailpit-bin`); Open appears while it is running.
-
-### WordPress vhosts
-
-Choosing type **wordpress** downloads the latest release into the site folder,
-enables `mysqli`, and grants the `http` user write access for the installer.
-
-## Configure
-
-```sh
-omarchy bar set io.github.giodc.omarchweb refreshSeconds 30
-omarchy bar set io.github.giodc.omarchweb webRoot ~/Web
-omarchy bar set io.github.giodc.omarchweb nginxPort 80
-omarchy bar move io.github.giodc.omarchweb --section right
-```
+Configured in the widget's own `shell.json` entry, or via
+`omarchy bar set giodc.omarchweb <key> <value>`:
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `refreshSeconds` | integer | 30 | How often to re-check service/db state while the panel is open |
-| `webRoot` | path | `~/Web` | Base folder for new vhosts/projects |
+| `webRoot` | path | `~/Web` | Base folder where new vhosts/projects are created |
 | `nginxPort` | integer | 80 | Listen port for generated virtual hosts |
-
-## IPC
-
-```sh
-omarchy-shell ipc call io.github.giodc.omarchweb toggle
-omarchy-shell shell summon io.github.giodc.omarchweb '{}'
-omarchy-shell shell hide io.github.giodc.omarchweb
-```
 
 ## Backends
 
-Scripts in `scripts/` (run from the panel):
+The plugin shells out to scripts in `scripts/`:
 
-- `services.sh` — systemd unit status/start/stop/restart
-- `db.sh` — MariaDB and PostgreSQL databases and app users
-- `vhost.sh` — Nginx virtual hosts (WordPress download, php/laravel/node)
-- `setup.sh` — install/uninstall packages for a service
-- `root.sh` — privileged helper via `pkexec` / passwordless sudo
+- `services.sh status|start|stop|restart <service>` — systemd unit control
+  (auto-detects system vs `--user` unit; system units go through `pkexec`).
+- `db.sh list|create|delete|exists|user-create|user-delete|grant` — MariaDB and
+  PostgreSQL database and app-user ops (`engine` is `mariadb` or `postgresql`).
+- `vhost.sh list|add|remove` — Nginx virtual host generation (one `pkexec`
+  prompt to write the site, update `/etc/hosts`, and reload nginx).
+- `setup.sh install|status` — one-shot stack installer.
+- `root.sh` — privileged helper used by the scripts above; not invoked from the panel directly.
 
-Environment overrides: `OMARCHWEB_SERVICES`, `OMARCHWEB_DB_BIN`,
+Overridable via environment: `OMARCHWEB_SERVICES`, `OMARCHWEB_DB_BIN`,
 `OMARCHWEB_PG_BIN`, `OMARCHWEB_WEB_ROOT`, `OMARCHWEB_NGINX_DIR`,
-`OMARCHWEB_PORT`, `OMARCHWEB_FPM_SOCK`, `OMARCHWEB_WP_URL`.
+`OMARCHWEB_PORT`, `OMARCHWEB_FPM_SOCK`.
 
-## Remove
+## IPC
+
+`IpcHandler` target `giodc.omarchweb` exposes `open`, `close`, `show`, `hide`,
+`toggle`:
 
 ```sh
-omarchy plugin remove io.github.giodc.omarchweb
+omarchy-shell ipc call giodc.omarchweb toggle
 ```
-
-## License
-
-MIT — see [LICENSE](LICENSE).
