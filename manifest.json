@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.giodc.omarchweb",
+  "name": "OmarchWeb",
+  "version": "0.1.0",
+  "author": "giodc",
+  "license": "MIT",
+  "description": "Web development control panel: start/stop/restart PHP-FPM, MariaDB, Nginx, PostgreSQL, Redis, and Mailpit; create/delete databases and app users; add PHP, Laravel, WordPress, or Node virtual hosts — from a native Omarchy bar panel.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "OmarchWeb",
+    "description": "Start/stop web services, manage databases, add virtual hosts",
+    "category": "Dev",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "schema": [
+      {
+        "key": "refreshSeconds",
+        "type": "integer",
+        "label": "Status refresh (seconds)",
+        "min": 5,
+        "max": 3600,
+        "step": 5,
+        "defaultValue": 30,
+        "description": "How often to re-check running services and database list while the panel is open."
+      },
+      {
+        "key": "webRoot",
+        "type": "path",
+        "label": "Web root",
+        "defaultValue": "~/Web",
+        "description": "Base folder where new virtual hosts and projects are created."
+      },
+      {
+        "key": "nginxPort",
+        "type": "integer",
+        "label": "Nginx listen port",
+        "min": 80,
+        "max": 65535,
+        "step": 1,
+        "defaultValue": 80,
+        "description": "Port that generated virtual hosts listen on."
+      }
+    ]
+  }
+}

@@ -1,0 +1,371 @@
+#!/usr/bin/bash
+# OmarchWeb — privileged helper.
+#
+# Invoked via passwordless sudo or pkexec (see lib.sh). Validates every
+# argument; do not add a generic "run this command" path.
+
+set -eu
+
+NGINX_DIR="${OMARCHWEB_NGINX_DIR:-/etc/nginx}"
+AVAIL="$NGINX_DIR/sites-available"
+ENABLED="$NGINX_DIR/sites-enabled"
+
+name_ok() {
+  case "$1" in
+    *[!A-Za-z0-9_.-]*|''|.*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+host_ok() {
+  case "$1" in
+    *[!A-Za-z0-9.-]*|''|.*|*-) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+svc_ok() {
+  case "$1" in
+    php-fpm|mariadb|nginx|postgresql|redis|mailpit) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+caller_home() {
+  local uid="${PKEXEC_UID:-${SUDO_UID:-}}"
+  if [ -n "$uid" ]; then
+    getent passwd "$uid" | cut -d: -f6
+    return
+  fi
+  local user="${SUDO_USER:-}"
+  if [ -n "$user" ] && [ "$user" != "root" ]; then
+    getent passwd "$user" | cut -d: -f6
+    return
+  fi
+  printf '%s\n' ""
+}
+
+ensure_nginx_layout() {
+  mkdir -p "$AVAIL" "$ENABLED"
+  local conf="$NGINX_DIR/nginx.conf"
+  [ -f "$conf" ] || return 0
+  if ! grep -Eq '^[[:space:]]*include[[:space:]]+sites-enabled/\*;' "$conf"; then
+    sed -i '/^[[:space:]]*http[[:space:]]*{/a\    include sites-enabled/*;' "$conf"
+  fi
+  # Arch's default mime.types is larger than nginx's stock hash; without this
+  # reload warns (or eventually fails) with "increase types_hash_max_size".
+  if ! grep -Eq '^[[:space:]]*types_hash_max_size' "$conf"; then
+    awk '
+      /^[[:space:]]*http[[:space:]]*\{/ {
+        print
+        print "    types_hash_max_size 4096;"
+        print "    types_hash_bucket_size 128;"
+        print "    server_names_hash_max_size 4096;"
+        print "    server_names_hash_bucket_size 128;"
+        next
+      }
+      { print }
+    ' "$conf" > "$conf.omarchweb.tmp" && mv "$conf.omarchweb.tmp" "$conf"
+  fi
+}
+
+# Allow nginx/php-fpm (user http) to traverse home and read the project.
+# Pass "write" as the second argument for apps that must create files
+# (WordPress wp-config.php, uploads, etc).
+grant_http_access() {
+  local docroot="$1"
+  local write="${2:-}"
+  [ -n "$docroot" ] && [ -d "$docroot" ] || return 0
+  id http >/dev/null 2>&1 || return 0
+  if command -v setfacl >/dev/null 2>&1; then
+    local parent mode="rX"
+    [ "$write" = "write" ] && mode="rwX"
+    parent="$(dirname "$docroot")"
+    while [ "$parent" != "/" ] && [ -n "$parent" ]; do
+      setfacl -m u:http:--x "$parent" 2>/dev/null || true
+      parent="$(dirname "$parent")"
+    done
+    setfacl -R -m "u:http:${mode}" "$docroot" 2>/dev/null || true
+    if [ "$write" = "write" ]; then
+      setfacl -R -d -m u:http:rwX "$docroot" 2>/dev/null || true
+    fi
+  fi
+}
+
+# Collapse $HOME/~/Web and ~/Web into $HOME/Web in managed vhost files,
+# and move any projects created under a literal ~/ directory.
+repair_vhost_paths() {
+  local home="$1"
+  [ -n "$home" ] || return 0
+  local f
+  for f in "$AVAIL"/*; do
+    [ -f "$f" ] || continue
+    grep -q 'managed by OmarchWeb' "$f" 2>/dev/null || continue
+    sed -i \
+      -e "s|root ${home}/~/Web/|root ${home}/Web/|g" \
+      -e "s|root ~/Web/|root ${home}/Web/|g" \
+      "$f"
+  done
+  if [ -d "$home/~/Web" ]; then
+    mkdir -p "$home/Web"
+    local src dest
+    for src in "$home/~/Web"/*; do
+      [ -e "$src" ] || continue
+      dest="$home/Web/$(basename "$src")"
+      if [ ! -e "$dest" ]; then
+        mv "$src" "$dest"
+      fi
+    done
+  fi
+  if [ -d "$home/Web" ]; then
+    grant_http_access "$home/Web"
+  fi
+}
+
+reload_nginx() {
+  if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then
+    nginx -t
+    systemctl reload nginx
+  fi
+}
+
+vhost_install() {
+  local name="$1" src="$2" host="$3"
+  name_ok "$name" || { echo "ERROR: invalid vhost name '$name'" >&2; return 1; }
+  host_ok "$host" || { echo "ERROR: invalid host '$host'" >&2; return 1; }
+  case "$src" in
+    /tmp/omarchweb-"$name".conf) ;;
+    *) echo "ERROR: unexpected vhost conf path" >&2; return 1 ;;
+  esac
+  [ -f "$src" ] || { echo "ERROR: missing generated conf $src" >&2; return 1; }
+
+  ensure_nginx_layout
+  cp "$src" "$AVAIL/$name"
+  ln -sf "$AVAIL/$name" "$ENABLED/$name"
+  if ! grep -Eq "(^|[[:space:]])$host([[:space:]]|$)" /etc/hosts 2>/dev/null; then
+    printf '%s\n' "127.0.0.1 $host" >> /etc/hosts
+  fi
+  local home docroot
+  home="$(caller_home)"
+  repair_vhost_paths "$home"
+  docroot=$(sed -n 's/.*root[[:space:]]*\([^;]*\);.*/\1/p' "$AVAIL/$name" | tr -d ' ' | head -1)
+  local write=""
+  if grep -q '^# type wordpress' "$AVAIL/$name" 2>/dev/null || [ -f "$docroot/wp-load.php" ]; then
+    write="write"
+  fi
+  grant_http_access "$docroot" "$write"
+  reload_nginx
+}
+
+vhost_remove() {
+  local name="$1"
+  name_ok "$name" || { echo "ERROR: invalid vhost name '$name'" >&2; return 1; }
+  rm -f "$ENABLED/$name" "$AVAIL/$name"
+  reload_nginx
+}
+
+do_systemctl() {
+  local action="$1"
+  shift
+  case "$action" in
+    start|stop|restart|reload|is-active)
+      svc_ok "${1:-}" || { echo "ERROR: unknown service '${1:-}'" >&2; return 1; }
+      systemctl "$action" "$@"
+      ;;
+    enable)
+      if [ "${1:-}" = "--now" ]; then
+        svc_ok "${2:-}" || { echo "ERROR: unknown service '${2:-}'" >&2; return 1; }
+        systemctl enable --now "$2"
+      else
+        svc_ok "${1:-}" || { echo "ERROR: unknown service '${1:-}'" >&2; return 1; }
+        systemctl enable "$@"
+      fi
+      ;;
+    disable)
+      if [ "${1:-}" = "--now" ]; then
+        svc_ok "${2:-}" || { echo "ERROR: unknown service '${2:-}'" >&2; return 1; }
+        systemctl disable --now "$2"
+      else
+        svc_ok "${1:-}" || { echo "ERROR: unknown service '${1:-}'" >&2; return 1; }
+        systemctl disable "$@"
+      fi
+      ;;
+    *)
+      echo "ERROR: systemctl action '$action' is not allowed" >&2
+      return 1
+      ;;
+  esac
+}
+
+do_pacman() {
+  # Only the flags setup.sh uses, plus a fixed package allow-list.
+  local -a pkgs=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -S|--needed|--noconfirm) shift ;;
+      php|php-fpm|mariadb|nginx|postgresql|redis|composer|php-pgsql|php-sqlite|mailpit|mailpit-bin)
+        pkgs+=("$1"); shift ;;
+      *) echo "ERROR: package '$1' is not allowed" >&2; return 1 ;;
+    esac
+  done
+  [ "${#pkgs[@]}" -gt 0 ] || { echo "ERROR: no packages to install" >&2; return 1; }
+  pacman -S --needed --noconfirm "${pkgs[@]}"
+}
+
+# Remove packages installed by OmarchWeb services (allow-listed).
+do_pacman_r() {
+  local -a pkgs=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -R|-Rs|-Rns|--noconfirm) shift ;;
+      php|php-fpm|mariadb|nginx|postgresql|redis|composer|php-pgsql|php-sqlite|mailpit|mailpit-bin)
+        pkgs+=("$1"); shift ;;
+      *) echo "ERROR: package '$1' is not allowed" >&2; return 1 ;;
+    esac
+  done
+  [ "${#pkgs[@]}" -gt 0 ] || { echo "ERROR: no packages to remove" >&2; return 1; }
+  pacman -R --noconfirm "${pkgs[@]}"
+}
+
+# Install a local package built by yay (AUR). Path must be under the caller's
+# ~/.cache/yay/ and named mailpit*.pkg.tar.* — GUI installs cannot use sudo's
+# TTY prompt, so setup.sh builds as the user then elevates here via pkexec.
+do_pacman_u() {
+  local pkg="$1"
+  local base home
+  [ -n "$pkg" ] && [ -f "$pkg" ] || { echo "ERROR: package file missing: $pkg" >&2; return 1; }
+  case "$pkg" in
+    *.pkg.tar.zst|*.pkg.tar.xz|*.pkg.tar.gz) ;;
+    *) echo "ERROR: not a pacman package: $pkg" >&2; return 1 ;;
+  esac
+  base="$(basename "$pkg")"
+  case "$base" in
+    *-debug-*) echo "ERROR: refusing debug package $base" >&2; return 1 ;;
+    mailpit-*.pkg.tar.*|mailpit-bin-*.pkg.tar.*) ;;
+    *) echo "ERROR: package '$base' is not allowed" >&2; return 1 ;;
+  esac
+  home="$(caller_home)"
+  [ -n "$home" ] || { echo "ERROR: cannot resolve caller home" >&2; return 1; }
+  case "$pkg" in
+    "$home"/.cache/yay/*) ;;
+    *) echo "ERROR: package must live under $home/.cache/yay/" >&2; return 1 ;;
+  esac
+  pacman -U --noconfirm "$pkg"
+}
+
+php_ext_ok() {
+  case "$1" in
+    mysqli|gd|exif|curl|zip|intl|bcmath|iconv|pdo_mysql|pdo_pgsql|pdo_sqlite)
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+enable_php_ext() {
+  local conf="/etc/php/conf.d/omarchweb.ini"
+  local ext
+  [ "$#" -gt 0 ] || { echo "ERROR: no php extensions given" >&2; return 1; }
+  mkdir -p /etc/php/conf.d
+  if [ ! -f "$conf" ]; then
+    printf '%s\n' "; managed by OmarchWeb" > "$conf"
+  fi
+  for ext in "$@"; do
+    php_ext_ok "$ext" || { echo "ERROR: php extension '$ext' is not allowed" >&2; return 1; }
+    [ -f "/usr/lib/php/modules/${ext}.so" ] || {
+      echo "ERROR: php extension '$ext' is not installed" >&2
+      return 1
+    }
+    if ! grep -Eq "^[[:space:]]*extension=${ext}([[:space:]]|$)" "$conf"; then
+      printf 'extension=%s\n' "$ext" >> "$conf"
+    fi
+  done
+  if systemctl is-active --quiet php-fpm 2>/dev/null; then
+    systemctl reload php-fpm || systemctl restart php-fpm
+  fi
+  echo "OK: enabled php extensions: $*"
+}
+
+init_mariadb() {
+  if [ -f /usr/lib/systemd/system/mariadb.service ] && \
+     [ ! -d /var/lib/mysql/mysql ] && command -v mariadb-install-db >/dev/null 2>&1; then
+    mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql
+  fi
+}
+
+init_postgres() {
+  if [ -f /usr/lib/systemd/system/postgresql.service ] && \
+     [ ! -d /var/lib/postgres/data ]; then
+    install -d -o postgres -g postgres /var/lib/postgres/data
+    if command -v runuser >/dev/null 2>&1; then
+      runuser -u postgres -- initdb -D /var/lib/postgres/data -E UTF8 --locale=C.UTF-8 || true
+    else
+      su -s /usr/bin/bash postgres -c 'initdb -D /var/lib/postgres/data -E UTF8 --locale=C.UTF-8' || true
+    fi
+  fi
+}
+
+case "${1:-}" in
+  nginx-tune)
+    home="${2:-$(caller_home)}"
+    ensure_nginx_layout
+    repair_vhost_paths "$home"
+    reload_nginx
+    echo "OK: nginx hash sizes updated and vhost paths repaired"
+    ;;
+  vhost-install)
+    [ "$#" -eq 4 ] || { echo "usage: root.sh vhost-install <name> <conf> <host>" >&2; exit 1; }
+    vhost_install "$2" "$3" "$4"
+    ;;
+  vhost-remove)
+    [ "$#" -eq 2 ] || { echo "usage: root.sh vhost-remove <name>" >&2; exit 1; }
+    vhost_remove "$2"
+    ;;
+  systemctl)
+    shift
+    [ "$#" -ge 2 ] || { echo "usage: root.sh systemctl <action> <service>" >&2; exit 1; }
+    do_systemctl "$@"
+    ;;
+  pacman)
+    shift
+    do_pacman "$@"
+    ;;
+  pacman-r)
+    shift
+    [ "$#" -ge 1 ] || { echo "usage: root.sh pacman-r <package...>" >&2; exit 1; }
+    do_pacman_r "$@"
+    ;;
+  pacman-u)
+    [ "$#" -eq 2 ] || { echo "usage: root.sh pacman-u <package.pkg.tar.*>" >&2; exit 1; }
+    do_pacman_u "$2"
+    ;;
+  mariadb)
+    shift
+    command -v mariadb >/dev/null 2>&1 || { echo "ERROR: mariadb not installed" >&2; exit 1; }
+    mariadb "$@"
+    ;;
+  postgres)
+    shift
+    command -v psql >/dev/null 2>&1 || { echo "ERROR: postgresql is not installed" >&2; exit 1; }
+    if command -v runuser >/dev/null 2>&1; then
+      runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 "$@"
+    else
+      su -s /usr/bin/bash postgres -c 'exec psql -d postgres -v ON_ERROR_STOP=1 "$@"' -- "$@"
+    fi
+    ;;
+  init-mariadb) init_mariadb ;;
+  init-postgres) init_postgres ;;
+  php-ext)
+    shift
+    [ "$#" -ge 1 ] || { echo "usage: root.sh php-ext <ext...>" >&2; exit 1; }
+    enable_php_ext "$@"
+    ;;
+  install-dir)
+    [ "$#" -ge 2 ] || exit 1
+    install -d "${@:2}"
+    ;;
+  *)
+    echo "unknown action: ${1:-}" >&2
+    echo "usage: root.sh vhost-install|vhost-remove|nginx-tune|systemctl|pacman|pacman-r|pacman-u|mariadb|postgres|init-mariadb|init-postgres|php-ext|install-dir" >&2
+    exit 1
+    ;;
+esac
