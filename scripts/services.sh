@@ -42,6 +42,22 @@ unit_kind() {
   fi
 }
 
+# systemctl is-active prints inactive/failed and exits non-zero — never use
+# `|| echo unknown` or the status line gains a newline and breaks parsing.
+unit_active_state() {
+  local scope="$1" svc="$2" state=""
+  if [ "$scope" = "user" ]; then
+    state="$(systemctl --user is-active "$svc" 2>/dev/null || true)"
+  else
+    state="$(systemctl is-active "$svc" 2>/dev/null || true)"
+  fi
+  state="${state%%$'\n'*}"
+  case "$state" in
+    active|inactive|failed|activating|deactivating|reloading|maintenance) printf '%s\n' "$state" ;;
+    *) printf '%s\n' "unknown" ;;
+  esac
+}
+
 status_line() {
   local svc="$1"
   local kind
@@ -51,12 +67,12 @@ status_line() {
 
   case "$kind" in
     system)
-      state="$(systemctl is-active "$svc" 2>/dev/null || echo unknown)"
-      sub="$(systemctl show -p SubState --value "$svc" 2>/dev/null)"
+      state="$(unit_active_state system "$svc")"
+      sub="$(systemctl show -p SubState --value "$svc" 2>/dev/null || true)"
       ;;
     user)
-      state="$(systemctl --user is-active "$svc" 2>/dev/null || echo unknown)"
-      sub="$(systemctl --user show -p SubState --value "$svc" 2>/dev/null)"
+      state="$(unit_active_state user "$svc")"
+      sub="$(systemctl --user show -p SubState --value "$svc" 2>/dev/null || true)"
       ;;
   esac
 

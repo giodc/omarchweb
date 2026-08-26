@@ -53,14 +53,14 @@ Panel {
   property bool dbLoaded: false
   property string dbEngine: "mariadb"
   readonly property var dbEngineKinds: [
-    { key: "mariadb", name: "MySQL", icon: "󱓥" },
+    { key: "mariadb", name: "MariaDB", icon: "󱓥" },
     { key: "postgresql", name: "PostgreSQL", icon: "" }
   ]
   readonly property bool dbTabOpen: tab === "mariadb" || tab === "postgresql"
   readonly property var panelTabs: {
     var tabs = [{ key: "services", label: "Services" }]
     if (root.serviceInstalled("mariadb"))
-      tabs.push({ key: "mariadb", label: "MySQL" })
+      tabs.push({ key: "mariadb", label: "MariaDB" })
     if (root.serviceInstalled("postgresql"))
       tabs.push({ key: "postgresql", label: "PostgreSQL" })
     tabs.push({ key: "vhosts", label: "Vhosts" })
@@ -998,7 +998,7 @@ Panel {
             }
           }
 
-          // ================= DATABASES TAB (MySQL / PostgreSQL) =================
+          // ================= DATABASES TAB (MariaDB / PostgreSQL) =================
           Column {
             visible: root.dbTabOpen
             width: parent.width

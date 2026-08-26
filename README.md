@@ -1,7 +1,7 @@
 # OmarchWeb
 
 A native Omarchy Quattro bar plugin for local web development: start/stop
-services, manage MySQL and PostgreSQL databases and users, and add Nginx
+services, manage MariaDB and PostgreSQL databases and users, and add Nginx
 virtual hosts (PHP, WordPress, Laravel, Node).
 
 ## Install
@@ -29,7 +29,7 @@ Click the globe on the bar to open the panel. Escape closes it.
 - **Services** — install, start, stop, restart, or uninstall PHP-FPM, MariaDB,
   Nginx, PostgreSQL, Redis, and Mailpit. Privileged actions use the desktop
   polkit agent (`pkexec`).
-- **MySQL / PostgreSQL** — tabs appear when that server is installed. Create
+- **MariaDB / PostgreSQL** — tabs appear when that server is installed. Create
   and delete databases and password users for apps (e.g. WordPress).
 - **Vhosts** — add PHP, WordPress, Laravel, or Node sites. WordPress downloads
   the latest release into the site folder.

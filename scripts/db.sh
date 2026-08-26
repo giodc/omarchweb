@@ -183,7 +183,7 @@ create_mariadb_user() {
   u="$(sql_quote "$name")"
   p="$(sql_quote "$pass")"
   db_privileged -e "CREATE USER IF NOT EXISTS ${u}@'localhost' IDENTIFIED BY ${p}; ALTER USER ${u}@'localhost' IDENTIFIED BY ${p}; GRANT ALL PRIVILEGES ON *.* TO ${u}@'localhost'; FLUSH PRIVILEGES;" || return 1
-  echo "OK: MySQL user '$name'@localhost (password login, all databases)"
+  echo "OK: MariaDB user '$name'@localhost (password login, all databases)"
 }
 
 delete_mariadb_user() {
@@ -194,7 +194,7 @@ delete_mariadb_user() {
   local u
   u="$(sql_quote "$name")"
   db_privileged -e "DROP USER IF EXISTS ${u}@'localhost'; FLUSH PRIVILEGES;" || return 1
-  echo "OK: dropped MySQL user '$name'@localhost"
+  echo "OK: dropped MariaDB user '$name'@localhost"
 }
 
 # ---- PostgreSQL ------------------------------------------------------------
