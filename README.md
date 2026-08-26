@@ -87,6 +87,8 @@ omarchy-shell shell hide io.github.giodc.omarchweb
 omarchy plugin remove io.github.giodc.omarchweb
 ```
 
+Removing the plugin does not uninstall web services or virtual hosts.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
