@@ -1,5 +1,7 @@
 # OmarchWeb
 
+![OmarchWeb panel](docs/screenshot.png)
+
 A native Omarchy Quattro bar plugin for local web development: start/stop
 services, manage MariaDB and PostgreSQL databases and users, and add Nginx
 virtual hosts (PHP, WordPress, Laravel, Node).
