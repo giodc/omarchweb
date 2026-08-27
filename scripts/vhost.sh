@@ -227,15 +227,11 @@ add_vhost() {
     fi
   fi
 
-  local tmp="/tmp/omarchweb-$name.conf"
-  render_block "$name" "$nginx_type" "$host" "$root" "$proxy_port" "$kind" > "$tmp"
-
-  # One privileged call so polkit asks for a password at most once.
-  if ! omarchweb_elevate vhost-install "$name" "$tmp" "$host"; then
-    rm -f "$tmp"
+  # Conf goes over stdin so root never reads a predictable /tmp path.
+  if ! render_block "$name" "$nginx_type" "$host" "$root" "$proxy_port" "$kind" \
+      | omarchweb_elevate vhost-install "$name" "$host"; then
     return 1
   fi
-  rm -f "$tmp"
 
   echo "OK: enabled vhost '$name' ($kind) at $host -> $root"
 }

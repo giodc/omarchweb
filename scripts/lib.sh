@@ -17,7 +17,8 @@ omarchweb_elevate() {
     return $?
   fi
   # -n: never prompt. If this works, the caller already has NOPASSWD/cached sudo.
-  if sudo -n true >/dev/null 2>&1; then
+  # Close stdin on the probe so a piped secret/config is not consumed.
+  if sudo -n true </dev/null >/dev/null 2>&1; then
     sudo -n "$omarchweb_root" "$@"
     return $?
   fi

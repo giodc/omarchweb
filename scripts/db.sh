@@ -14,7 +14,7 @@
 #   db.sh create [engine] <name>
 #   db.sh delete [engine] <name>
 #   db.sh exists [engine] <name>         exit 0 if the database exists
-#   db.sh user-create <engine> <name> <password>
+#   db.sh user-create <engine> <name>    password on stdin (never argv)
 #   db.sh user-delete <engine> <name>
 #   db.sh grant [engine]                 ensure local access for this user
 #
@@ -121,6 +121,27 @@ db_privileged() {
   esac
 }
 
+# Feed SQL on the client stdin so secrets never appear in process argv.
+db_privileged_sql() {
+  local sql="$1"
+  local out rc
+  out="$(printf '%s\n' "$sql" | db 2>&1)"; rc=$?
+  if [ $rc -eq 0 ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  case "$out" in
+    *[Dd]enied*)
+      grant_mariadb || { printf '%s\n' "$out" >&2; return $rc; }
+      printf '%s\n' "$sql" | db
+      ;;
+    *)
+      printf '%s\n' "$out" >&2
+      return $rc
+      ;;
+  esac
+}
+
 mariadb_status() {
   if ! command -v "$DB_BIN" >/dev/null 2>&1; then
     echo "missing"
@@ -182,7 +203,7 @@ create_mariadb_user() {
   local u p
   u="$(sql_quote "$name")"
   p="$(sql_quote "$pass")"
-  db_privileged -e "CREATE USER IF NOT EXISTS ${u}@'localhost' IDENTIFIED BY ${p}; ALTER USER ${u}@'localhost' IDENTIFIED BY ${p}; GRANT ALL PRIVILEGES ON *.* TO ${u}@'localhost'; FLUSH PRIVILEGES;" || return 1
+  db_privileged_sql "CREATE USER IF NOT EXISTS ${u}@'localhost' IDENTIFIED BY ${p}; ALTER USER ${u}@'localhost' IDENTIFIED BY ${p}; GRANT ALL PRIVILEGES ON *.* TO ${u}@'localhost'; FLUSH PRIVILEGES;" || return 1
   echo "OK: MariaDB user '$name'@localhost (password login, all databases)"
 }
 
@@ -228,6 +249,26 @@ pg_privileged() {
     *"permission denied"*|*"must be owner"*|*"must be superuser"*|*"does not exist"*)
       grant_postgres || { printf '%s\n' "$out" >&2; return $rc; }
       pg "$@"
+      ;;
+    *)
+      printf '%s\n' "$out" >&2
+      return $rc
+      ;;
+  esac
+}
+
+pg_privileged_sql() {
+  local sql="$1"
+  local out rc
+  out="$(printf '%s\n' "$sql" | pg 2>&1)"; rc=$?
+  if [ $rc -eq 0 ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  case "$out" in
+    *"permission denied"*|*"must be owner"*|*"must be superuser"*|*"does not exist"*)
+      grant_postgres || { printf '%s\n' "$out" >&2; return $rc; }
+      printf '%s\n' "$sql" | pg
       ;;
     *)
       printf '%s\n' "$out" >&2
@@ -298,7 +339,7 @@ create_postgres_user() {
   local u p
   u="$(sql_quote "$name")"
   p="$(sql_quote "$pass")"
-  pg_privileged -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = ${u}) THEN CREATE ROLE ${name} WITH LOGIN PASSWORD ${p} CREATEDB; ELSE ALTER ROLE ${name} WITH LOGIN PASSWORD ${p} CREATEDB; END IF; END \$\$;" || return 1
+  pg_privileged_sql "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = ${u}) THEN CREATE ROLE ${name} WITH LOGIN PASSWORD ${p} CREATEDB; ELSE ALTER ROLE ${name} WITH LOGIN PASSWORD ${p} CREATEDB; END IF; END \$\$;" || return 1
   echo "OK: PostgreSQL user '$name' (password login; host 127.0.0.1)"
 }
 
@@ -389,8 +430,9 @@ case "${1:-}" in
     ;;
   user-create)
     parse_engine_name "${2:-}" "${3:-}" || exit 1
-    pass="${4:-}"
-    [ -n "$pass" ] || { echo "ERROR: password is required" >&2; exit 1; }
+    [ -z "${4:-}" ] || { echo "ERROR: pass the password on stdin, not as an argument" >&2; exit 1; }
+    IFS= read -r pass || true
+    [ -n "$pass" ] || { echo "ERROR: password is required on stdin" >&2; exit 1; }
     user_ok "$name" || { echo "ERROR: invalid user name" >&2; exit 1; }
     if [ "$engine" = "postgresql" ]; then
       create_postgres_user "$name" "$pass"
@@ -434,7 +476,8 @@ case "${1:-}" in
     ;;
   *)
     echo "unknown action: ${1:-}" >&2
-    echo "usage: db.sh list [engine] | create [engine] <name> | delete [engine] <name> | exists [engine] <name> | user-create <engine> <name> <password> | user-delete <engine> <name> | grant [engine]" >&2
+    echo "usage: db.sh list [engine] | create [engine] <name> | delete [engine] <name> | exists [engine] <name> | user-create <engine> <name> | user-delete <engine> <name> | grant [engine]" >&2
+    echo "       user-create reads the password from stdin" >&2
     exit 1
     ;;
 esac

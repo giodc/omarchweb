@@ -209,17 +209,18 @@ Panel {
   property string newDbName: ""
   property string newDbUserName: ""
   property string newDbUserPass: ""
+  function runDbAction(args) {
+    busy = true
+    dbActionProc.command = args
+    dbActionProc.running = true
+  }
   function createDb() {
     var name = String(newDbName).trim()
     if (!name) return
-    busy = true
-    dbActionProc.command = [ scriptPath("db.sh"), "create", dbEngine, name ]
-    dbActionProc.running = true
+    runDbAction([ scriptPath("db.sh"), "create", dbEngine, name ])
   }
   function deleteDb(name) {
-    busy = true
-    dbActionProc.command = [ scriptPath("db.sh"), "delete", dbEngine, name ]
-    dbActionProc.running = true
+    runDbAction([ scriptPath("db.sh"), "delete", dbEngine, name ])
   }
   function createDbUser() {
     var name = String(newDbUserName).trim()
@@ -229,18 +230,28 @@ Panel {
       return
     }
     busy = true
-    dbActionProc.command = [ scriptPath("db.sh"), "user-create", dbEngine, name, pass ]
-    dbActionProc.running = true
+    // Password goes over stdin, never argv (/proc is world-readable).
+    dbUserCreateProc.secret = pass
+    dbUserCreateProc.command = [ scriptPath("db.sh"), "user-create", dbEngine, name ]
+    dbUserCreateProc.running = true
   }
   function deleteDbUser(name) {
-    busy = true
-    dbActionProc.command = [ scriptPath("db.sh"), "user-delete", dbEngine, name ]
-    dbActionProc.running = true
+    runDbAction([ scriptPath("db.sh"), "user-delete", dbEngine, name ])
   }
   function grantDb() {
-    busy = true
-    dbActionProc.command = [ scriptPath("db.sh"), "grant", dbEngine ]
-    dbActionProc.running = true
+    runDbAction([ scriptPath("db.sh"), "grant", dbEngine ])
+  }
+  function finishDbAction(exitCode, errText, outText) {
+    busy = false
+    if (exitCode !== 0) {
+      setNotice(Model.clean(errText || outText) || "database operation failed", true)
+      return
+    }
+    setNotice(Model.clean(outText) || "database operation done", false)
+    newDbName = ""
+    newDbUserName = ""
+    newDbUserPass = ""
+    refreshDatabases()
   }
 
   // ---- Vhost actions ----
@@ -392,16 +403,22 @@ Panel {
     stdout: StdioCollector { id: dbActionOut; waitForEnd: true }
     stderr: StdioCollector { id: dbActionErr; waitForEnd: true }
     onExited: function(exitCode) {
-      root.busy = false
-      if (exitCode !== 0) {
-        root.setNotice(Model.clean(dbActionErr.text || dbActionOut.text) || "database operation failed", true)
-        return
-      }
-      root.setNotice(Model.clean(dbActionOut.text) || "database operation done", false)
-      root.newDbName = ""
-      root.newDbUserName = ""
-      root.newDbUserPass = ""
-      root.refreshDatabases()
+      root.finishDbAction(exitCode, dbActionErr.text, dbActionOut.text)
+    }
+  }
+
+  Process {
+    id: dbUserCreateProc
+    property string secret: ""
+    stdinEnabled: true
+    stdout: StdioCollector { id: dbUserCreateOut; waitForEnd: true }
+    stderr: StdioCollector { id: dbUserCreateErr; waitForEnd: true }
+    onStarted: {
+      write(secret + "\n")
+      secret = ""
+    }
+    onExited: function(exitCode) {
+      root.finishDbAction(exitCode, dbUserCreateErr.text, dbUserCreateOut.text)
     }
   }
 

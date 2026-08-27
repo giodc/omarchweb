@@ -45,17 +45,59 @@ caller_home() {
   printf '%s\n' ""
 }
 
+# fsync a file or directory. GNU coreutils `sync -d` is fdatasync(2).
+fsync_path() {
+  sync -d "$1" 2>/dev/null || sync "$1"
+}
+
+# Write dest via an O_EXCL same-directory regular file, fsync, then rename.
+# With no extra args, content is read from stdin. Otherwise those args are
+# the writer (they must not clobber dest; they should read dest and print).
+# rename(2) replaces a symlink at dest instead of writing through it.
+atomic_replace() {
+  local dest="$1"
+  local dir tmp
+  shift
+  dir="$(dirname -- "$dest")"
+  mkdir -p "$dir"
+  tmp="$(mktemp -p "$dir" -- "$(basename -- "$dest").XXXXXX")" || return 1
+  if [ "$#" -gt 0 ]; then
+    if ! "$@" > "$tmp"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+  else
+    if ! cat > "$tmp"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+  fi
+  if ! chmod 0644 -- "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! fsync_path "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! mv -f -- "$tmp" "$dest"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  fsync_path "$dir" || true
+}
+
 ensure_nginx_layout() {
   mkdir -p "$AVAIL" "$ENABLED"
   local conf="$NGINX_DIR/nginx.conf"
   [ -f "$conf" ] || return 0
   if ! grep -Eq '^[[:space:]]*include[[:space:]]+sites-enabled/\*;' "$conf"; then
-    sed -i '/^[[:space:]]*http[[:space:]]*{/a\    include sites-enabled/*;' "$conf"
+    atomic_replace "$conf" sed '/^[[:space:]]*http[[:space:]]*{/a\    include sites-enabled/*;' "$conf" || return 1
   fi
   # Arch's default mime.types is larger than nginx's stock hash; without this
   # reload warns (or eventually fails) with "increase types_hash_max_size".
   if ! grep -Eq '^[[:space:]]*types_hash_max_size' "$conf"; then
-    awk '
+    atomic_replace "$conf" awk '
       /^[[:space:]]*http[[:space:]]*\{/ {
         print
         print "    types_hash_max_size 4096;"
@@ -65,7 +107,7 @@ ensure_nginx_layout() {
         next
       }
       { print }
-    ' "$conf" > "$conf.omarchweb.tmp" && mv "$conf.omarchweb.tmp" "$conf"
+    ' "$conf" || return 1
   fi
 }
 
@@ -101,10 +143,10 @@ repair_vhost_paths() {
   for f in "$AVAIL"/*; do
     [ -f "$f" ] || continue
     grep -q 'managed by OmarchWeb' "$f" 2>/dev/null || continue
-    sed -i \
+    atomic_replace "$f" sed \
       -e "s|root ${home}/~/Web/|root ${home}/Web/|g" \
       -e "s|root ~/Web/|root ${home}/Web/|g" \
-      "$f"
+      "$f" || return 1
   done
   if [ -d "$home/~/Web" ]; then
     mkdir -p "$home/Web"
@@ -130,17 +172,15 @@ reload_nginx() {
 }
 
 vhost_install() {
-  local name="$1" src="$2" host="$3"
+  local name="$1" host="$2"
+  local body
   name_ok "$name" || { echo "ERROR: invalid vhost name '$name'" >&2; return 1; }
   host_ok "$host" || { echo "ERROR: invalid host '$host'" >&2; return 1; }
-  case "$src" in
-    /tmp/omarchweb-"$name".conf) ;;
-    *) echo "ERROR: unexpected vhost conf path" >&2; return 1 ;;
-  esac
-  [ -f "$src" ] || { echo "ERROR: missing generated conf $src" >&2; return 1; }
+  body="$(cat)" || { echo "ERROR: missing generated vhost conf on stdin" >&2; return 1; }
+  [ -n "$body" ] || { echo "ERROR: empty vhost conf" >&2; return 1; }
 
   ensure_nginx_layout
-  cp "$src" "$AVAIL/$name"
+  printf '%s\n' "$body" | atomic_replace "$AVAIL/$name"
   ln -sf "$AVAIL/$name" "$ENABLED/$name"
   if ! grep -Eq "(^|[[:space:]])$host([[:space:]]|$)" /etc/hosts 2>/dev/null; then
     printf '%s\n' "127.0.0.1 $host" >> /etc/hosts
@@ -313,8 +353,8 @@ case "${1:-}" in
     echo "OK: nginx hash sizes updated and vhost paths repaired"
     ;;
   vhost-install)
-    [ "$#" -eq 4 ] || { echo "usage: root.sh vhost-install <name> <conf> <host>" >&2; exit 1; }
-    vhost_install "$2" "$3" "$4"
+    [ "$#" -eq 3 ] || { echo "usage: root.sh vhost-install <name> <host>  (conf on stdin)" >&2; exit 1; }
+    vhost_install "$2" "$3"
     ;;
   vhost-remove)
     [ "$#" -eq 2 ] || { echo "usage: root.sh vhost-remove <name>" >&2; exit 1; }
