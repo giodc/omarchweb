@@ -34,7 +34,7 @@ Click the globe on the bar to open the panel. Escape closes it.
 - **MariaDB / PostgreSQL** — tabs appear when that server is installed. Create
   and delete databases and password users for apps (e.g. WordPress).
 - **Vhosts** — add PHP, WordPress, Laravel, or Node sites. WordPress downloads
-  the latest release into the site folder.
+  pinned release 7.1 (SHA-256 verified) into the site folder.
 
 Default panel tab is **Services**. The bar widget defaults to the **right**
 section (`defaultSection`).
@@ -56,10 +56,24 @@ omarchy bar set io.github.giodc.omarchweb nginxPort 80
 
 ## Privileges
 
-Systemd control, package install/remove, nginx config, `/etc/hosts`, and some
-database grants run through `scripts/root.sh` via passwordless `sudo` when
-available, otherwise `pkexec`. The panel itself has no TTY, so password prompts
-use Omarchy’s polkit dialog.
+The first privileged action installs a reviewed snapshot of `scripts/root.sh`
+to `/usr/local/libexec/omarchweb/root.sh` (root-owned, mode 0555). After that,
+systemd control, package install/remove, nginx config, `/etc/hosts`, Mailpit
+install, and database grants run that snapshot via passwordless `sudo` when
+available, otherwise `pkexec`. The plugin checkout is never executed as root.
+
+If you update the plugin, the next privileged action reinstalls the helper
+when the digest no longer matches.
+
+## Tests
+
+```sh
+bash test/security.sh
+```
+
+These checks encode the marketplace privilege and supply-chain review
+(root-owned helper, pinned artifacts, no generic `install -d`). Run them
+before resubmitting.
 
 ## Backends
 
@@ -67,13 +81,14 @@ Scripts in `scripts/` (not invoked as a second Quickshell process):
 
 - `services.sh` — systemd status/start/stop/restart
 - `db.sh` — MariaDB and PostgreSQL databases and app users
-- `vhost.sh` — Nginx virtual hosts
-- `setup.sh` — install/uninstall stack packages (Mailpit via AUR + `pkexec`)
-- `root.sh` — allow-listed privileged helper
+- `vhost.sh` — Nginx virtual hosts (pinned WordPress release)
+- `setup.sh` — install/uninstall stack packages (Mailpit from a pinned GitHub release)
+- `root.sh` — allow-listed privileged helper (installed as a root-owned snapshot)
+- `pins.sh` — reviewed versions and artifact digests
 
 Environment overrides: `OMARCHWEB_SERVICES`, `OMARCHWEB_DB_BIN`,
 `OMARCHWEB_PG_BIN`, `OMARCHWEB_WEB_ROOT`, `OMARCHWEB_NGINX_DIR`,
-`OMARCHWEB_PORT`, `OMARCHWEB_FPM_SOCK`, `OMARCHWEB_WP_URL`.
+`OMARCHWEB_PORT`, `OMARCHWEB_FPM_SOCK`.
 
 ## IPC
 
@@ -89,7 +104,14 @@ omarchy-shell shell hide io.github.giodc.omarchweb
 omarchy plugin remove io.github.giodc.omarchweb
 ```
 
-Removing the plugin does not uninstall web services or virtual hosts.
+Removing the plugin does not uninstall web services, virtual hosts, or the
+root-owned helper at `/usr/local/libexec/omarchweb/root.sh`. To drop the
+helper after removing the plugin:
+
+```sh
+sudo rm -f /usr/local/libexec/omarchweb/root.sh
+sudo rmdir /usr/local/libexec/omarchweb 2>/dev/null || true
+```
 
 ## License
 

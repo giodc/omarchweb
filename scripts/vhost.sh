@@ -3,8 +3,8 @@
 #
 # Generates an nginx server block for a PHP, Laravel, WordPress, or Node
 # project and enables it via sites-available/sites-enabled. PHP/Laravel
-# vhosts get a project folder; WordPress vhosts download the latest
-# release.
+# vhosts get a project folder; WordPress vhosts download a pinned release
+# (scripts/pins.sh) and verify its digest before extract.
 #
 # Conventions (all tunable via env):
 #   OMARCHWEB_WEB_ROOT   base dir for projects           (default: ~/Web)
@@ -13,9 +13,8 @@
 #   OMARCHWEB_FPM_SOCK   php-fpm socket                  (default: unix:/run/php-fpm/php-fpm.sock)
 #
 # The privileged parts (writing nginx configs, /etc/hosts, reloading nginx)
-# run through root.sh via passwordless sudo when available, otherwise pkexec
-# so the desktop polkit agent can prompt. The panel has no TTY, so `sudo`
-# cannot ask for a password itself. Names are validated to a safe set.
+# run through the root-owned helper snapshot via passwordless sudo when
+# available, otherwise pkexec so the desktop polkit agent can prompt.
 
 set -u
 # shellcheck source=lib.sh
@@ -25,7 +24,6 @@ WEB_ROOT="${OMARCHWEB_WEB_ROOT:-$HOME/Web}"
 NGINX_DIR="${OMARCHWEB_NGINX_DIR:-/etc/nginx}"
 PORT="${OMARCHWEB_PORT:-80}"
 FPM_SOCK="${OMARCHWEB_FPM_SOCK:-unix:/run/php-fpm/php-fpm.sock}"
-WP_URL="${OMARCHWEB_WP_URL:-https://wordpress.org/latest.tar.gz}"
 AVAIL="$NGINX_DIR/sites-available"
 ENABLED="$NGINX_DIR/sites-enabled"
 
@@ -137,34 +135,26 @@ install_wordpress() {
     return 0
   fi
 
-  local fetch=""
-  if command -v curl >/dev/null 2>&1; then
-    fetch="curl"
-  elif command -v wget >/dev/null 2>&1; then
-    fetch="wget"
-  else
-    echo "ERROR: curl or wget is required to download WordPress" >&2
-    return 1
-  fi
-
   local tmp
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/omarchweb-wp.XXXXXX")" || return 1
-  echo "Downloading latest WordPress..."
-  if [ "$fetch" = "curl" ]; then
-    if ! curl -fL --retry 2 --connect-timeout 20 -o "$tmp/wordpress.tar.gz" "$WP_URL"; then
-      echo "ERROR: failed to download WordPress" >&2
-      rm -rf "$tmp"
-      return 1
-    fi
-  else
-    if ! wget -q -O "$tmp/wordpress.tar.gz" "$WP_URL"; then
-      echo "ERROR: failed to download WordPress" >&2
+  echo "Downloading WordPress $OMARCHWEB_WP_VERSION..."
+  if ! omarchweb_fetch_verified "$OMARCHWEB_WP_URL" "$tmp/wordpress.tar.gz" \
+      "$OMARCHWEB_WP_SHA256" "$OMARCHWEB_WP_MAX_BYTES"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  if command -v sha1sum >/dev/null 2>&1; then
+    local sha1
+    sha1="$(sha1sum -- "$tmp/wordpress.tar.gz" | awk '{print $1}')"
+    if [ "$sha1" != "$OMARCHWEB_WP_SHA1" ]; then
+      echo "ERROR: WordPress SHA1 mismatch" >&2
       rm -rf "$tmp"
       return 1
     fi
   fi
 
-  if ! tar -xzf "$tmp/wordpress.tar.gz" -C "$tmp" || [ ! -d "$tmp/wordpress" ]; then
+  if ! tar -xzf "$tmp/wordpress.tar.gz" -C "$tmp" --no-same-owner wordpress \
+      || [ ! -d "$tmp/wordpress" ]; then
     echo "ERROR: failed to extract WordPress" >&2
     rm -rf "$tmp"
     return 1
@@ -175,7 +165,7 @@ install_wordpress() {
     return 1
   fi
   rm -rf "$tmp"
-  echo "OK: WordPress extracted to $dest"
+  echo "OK: WordPress $OMARCHWEB_WP_VERSION extracted to $dest"
   if id http >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1; then
     setfacl -R -m u:http:rwX "$dest" 2>/dev/null || true
     setfacl -R -d -m u:http:rwX "$dest" 2>/dev/null || true

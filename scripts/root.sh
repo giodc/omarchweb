@@ -1,14 +1,31 @@
 #!/usr/bin/bash
 # OmarchWeb — privileged helper.
 #
-# Invoked via passwordless sudo or pkexec (see lib.sh). Validates every
-# argument; do not add a generic "run this command" path.
+# Installed as a root-owned snapshot at /usr/local/libexec/omarchweb/root.sh
+# and invoked via sudo or pkexec (see lib.sh). Validates every argument;
+# do not add a generic "run this command" path.
 
 set -eu
 
-NGINX_DIR="${OMARCHWEB_NGINX_DIR:-/etc/nginx}"
+if [ "$(id -u)" -eq 0 ]; then
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
+  export PATH
+  unset CDPATH
+  NGINX_DIR=/etc/nginx
+else
+  NGINX_DIR="${OMARCHWEB_NGINX_DIR:-/etc/nginx}"
+fi
 AVAIL="$NGINX_DIR/sites-available"
 ENABLED="$NGINX_DIR/sites-enabled"
+
+# Pinned Mailpit GitHub release (duplicated from scripts/pins.sh; do not source
+# the user-writable checkout from this helper).
+MAILPIT_VERSION="1.31.0"
+MAILPIT_SHA256_AMD64="076b5ded9a2182842b93e761b9586a1a251445bffe2666f9f22a6dc14470237d"
+MAILPIT_SHA256_ARM64="db3e685ed59d58354a29a4e7bfd0497f050af771a41e122aabdb0bd4fb915952"
+MAILPIT_MAX_BYTES=16777216
+MAILPIT_BIN="/usr/local/bin/mailpit"
+MAILPIT_UNIT="/etc/systemd/system/mailpit.service"
 
 name_ok() {
   case "$1" in
@@ -243,7 +260,7 @@ do_pacman() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -S|--needed|--noconfirm) shift ;;
-      php|php-fpm|mariadb|nginx|postgresql|redis|composer|php-pgsql|php-sqlite|mailpit|mailpit-bin)
+      php|php-fpm|mariadb|nginx|postgresql|redis|composer|php-pgsql|php-sqlite)
         pkgs+=("$1"); shift ;;
       *) echo "ERROR: package '$1' is not allowed" >&2; return 1 ;;
     esac
@@ -267,30 +284,67 @@ do_pacman_r() {
   pacman -R --noconfirm "${pkgs[@]}"
 }
 
-# Install a local package built by yay (AUR). Path must be under the caller's
-# ~/.cache/yay/ and named mailpit*.pkg.tar.* — GUI installs cannot use sudo's
-# TTY prompt, so setup.sh builds as the user then elevates here via pkexec.
-do_pacman_u() {
-  local pkg="$1"
-  local base home
-  [ -n "$pkg" ] && [ -f "$pkg" ] || { echo "ERROR: package file missing: $pkg" >&2; return 1; }
-  case "$pkg" in
-    *.pkg.tar.zst|*.pkg.tar.xz|*.pkg.tar.gz) ;;
-    *) echo "ERROR: not a pacman package: $pkg" >&2; return 1 ;;
+mailpit_expected_digest() {
+  case "$(uname -m)" in
+    x86_64) printf '%s\n' "$MAILPIT_SHA256_AMD64" ;;
+    aarch64) printf '%s\n' "$MAILPIT_SHA256_ARM64" ;;
+    *) return 1 ;;
   esac
-  base="$(basename "$pkg")"
-  case "$base" in
-    *-debug-*) echo "ERROR: refusing debug package $base" >&2; return 1 ;;
-    mailpit-*.pkg.tar.*|mailpit-bin-*.pkg.tar.*) ;;
-    *) echo "ERROR: package '$base' is not allowed" >&2; return 1 ;;
-  esac
-  home="$(caller_home)"
-  [ -n "$home" ] || { echo "ERROR: cannot resolve caller home" >&2; return 1; }
-  case "$pkg" in
-    "$home"/.cache/yay/*) ;;
-    *) echo "ERROR: package must live under $home/.cache/yay/" >&2; return 1 ;;
-  esac
-  pacman -U --noconfirm "$pkg"
+}
+
+# Install Mailpit from a descriptor-bound tarball on stdin. Digest and dest
+# paths are baked into this snapshot; no pathname from the caller is used.
+do_install_mailpit() {
+  local expected tmp got
+  expected="$(mailpit_expected_digest)" || {
+    echo "ERROR: unsupported architecture $(uname -m) for mailpit" >&2
+    return 1
+  }
+  tmp="$(mktemp -d -p /run omarchweb-mailpit.XXXXXX)" || return 1
+  # shellcheck disable=SC2064
+  trap 'rm -rf -- "$tmp"' RETURN
+  dd bs=65536 count=$((MAILPIT_MAX_BYTES / 65536 + 1)) of="$tmp/mailpit.tar.gz" status=none
+  got="$(sha256sum -- "$tmp/mailpit.tar.gz" | awk '{print $1}')"
+  if [ "$got" != "$expected" ]; then
+    echo "ERROR: mailpit digest mismatch (refusing to install)" >&2
+    return 1
+  fi
+  tar -xzf "$tmp/mailpit.tar.gz" -C "$tmp" --no-same-owner mailpit
+  [ -f "$tmp/mailpit" ] || {
+    echo "ERROR: mailpit binary missing from verified archive" >&2
+    return 1
+  }
+  chmod 0755 -- "$tmp/mailpit"
+  install -D -o root -g root -m 0755 "$tmp/mailpit" "$MAILPIT_BIN"
+  atomic_replace "$MAILPIT_UNIT" printf '%s\n' \
+    "# managed by OmarchWeb" \
+    "[Unit]" \
+    "Description=Mailpit SMTP testing (OmarchWeb)" \
+    "After=network.target" \
+    "" \
+    "[Service]" \
+    "Type=simple" \
+    "DynamicUser=yes" \
+    "StateDirectory=mailpit" \
+    "ExecStart=$MAILPIT_BIN --database /var/lib/mailpit/mailpit.db --listen 127.0.0.1:8025 --smtp 127.0.0.1:1025" \
+    "Restart=on-failure" \
+    "" \
+    "[Install]" \
+    "WantedBy=multi-user.target"
+  systemctl daemon-reload
+  echo "OK: installed mailpit $MAILPIT_VERSION to $MAILPIT_BIN"
+}
+
+do_remove_mailpit() {
+  if [ -f "$MAILPIT_UNIT" ] && grep -q '^# managed by OmarchWeb' "$MAILPIT_UNIT"; then
+    systemctl disable --now mailpit 2>/dev/null || true
+    rm -f -- "$MAILPIT_UNIT"
+    systemctl daemon-reload
+  fi
+  if [ -f "$MAILPIT_BIN" ] && [ ! -L "$MAILPIT_BIN" ]; then
+    rm -f -- "$MAILPIT_BIN"
+  fi
+  echo "OK: removed OmarchWeb mailpit"
 }
 
 php_ext_ok() {
@@ -374,9 +428,13 @@ case "${1:-}" in
     [ "$#" -ge 1 ] || { echo "usage: root.sh pacman-r <package...>" >&2; exit 1; }
     do_pacman_r "$@"
     ;;
-  pacman-u)
-    [ "$#" -eq 2 ] || { echo "usage: root.sh pacman-u <package.pkg.tar.*>" >&2; exit 1; }
-    do_pacman_u "$2"
+  install-mailpit)
+    [ "$#" -eq 1 ] || { echo "usage: root.sh install-mailpit  (tarball on stdin)" >&2; exit 1; }
+    do_install_mailpit
+    ;;
+  remove-mailpit)
+    [ "$#" -eq 1 ] || { echo "usage: root.sh remove-mailpit" >&2; exit 1; }
+    do_remove_mailpit
     ;;
   mariadb)
     shift
@@ -399,13 +457,9 @@ case "${1:-}" in
     [ "$#" -ge 1 ] || { echo "usage: root.sh php-ext <ext...>" >&2; exit 1; }
     enable_php_ext "$@"
     ;;
-  install-dir)
-    [ "$#" -ge 2 ] || exit 1
-    install -d "${@:2}"
-    ;;
   *)
     echo "unknown action: ${1:-}" >&2
-    echo "usage: root.sh vhost-install|vhost-remove|nginx-tune|systemctl|pacman|pacman-r|pacman-u|mariadb|postgres|init-mariadb|init-postgres|php-ext|install-dir" >&2
+    echo "usage: root.sh vhost-install|vhost-remove|nginx-tune|systemctl|pacman|pacman-r|install-mailpit|remove-mailpit|mariadb|postgres|init-mariadb|init-postgres|php-ext" >&2
     exit 1
     ;;
 esac
