@@ -123,7 +123,23 @@ Panel {
   property string noticeColor: "transparent"
   property bool busy: false
 
-  property string setupOutput: ""
+  property string actionLog: ""
+
+  function setActionLog(stdout, stderr) {
+    var text = Model.clean(stdout || "")
+    var err = Model.clean(stderr || "")
+    if (err.trim() !== "") {
+      if (text.trim() !== "") text += "\n"
+      text += err
+    }
+    actionLog = text.trim()
+  }
+
+  function copyLogs() {
+    if (!actionLog || !root.bar) return
+    Quickshell.execDetached(["bash", "-c", "printf %s " + Util.shellQuote(actionLog) + " | wl-copy"])
+    setNotice("logs copied to clipboard", false)
+  }
 
   function scriptPath(name) {
     var url = Qt.resolvedUrl("scripts/" + name)
@@ -243,6 +259,7 @@ Panel {
   }
   function finishDbAction(exitCode, errText, outText) {
     busy = false
+    setActionLog(outText, errText)
     if (exitCode !== 0) {
       setNotice(Model.clean(errText || outText) || "database operation failed", true)
       return
@@ -389,6 +406,7 @@ Panel {
     stderr: StdioCollector { id: serviceActionErr; waitForEnd: true }
     onExited: function(exitCode) {
       root.busy = false
+      root.setActionLog(serviceActionOut.text, serviceActionErr.text)
       if (exitCode !== 0) {
         root.setNotice(Model.clean(serviceActionErr.text || serviceActionOut.text) || (root.actingService + " failed"), true)
         return
@@ -428,6 +446,7 @@ Panel {
     stderr: StdioCollector { id: vhostActionErr; waitForEnd: true }
     onExited: function(exitCode) {
       root.busy = false
+      root.setActionLog(vhostActionOut.text, vhostActionErr.text)
       if (exitCode !== 0) {
         root.setNotice(Model.clean(vhostActionErr.text || vhostActionOut.text) || "vhost operation failed", true)
         return
@@ -449,8 +468,7 @@ Panel {
       root.busy = false
       root.installingService = ""
       root.setupAction = ""
-      root.setupOutput = Model.clean(setupOut.text)
-      if (setupErr.text.trim() !== "") root.setupOutput += "\n" + Model.clean(setupErr.text)
+      root.setActionLog(setupOut.text, setupErr.text)
       if (exitCode !== 0) {
         root.setNotice(Model.clean(setupErr.text || setupOut.text) || (action === "uninstall" ? "uninstall failed" : "setup failed"), true)
         return
@@ -1592,6 +1610,87 @@ Panel {
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: root.openVhost(vhRow.modelData)
+                }
+              }
+            }
+          }
+
+          // ---- Action log ----
+          Column {
+            visible: root.actionLog !== ""
+            width: parent.width
+            spacing: Style.space(6)
+
+            Item {
+              width: parent.width
+              height: copyLogsBtn.height
+
+              Text {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: "LOG"
+                color: root.dim
+                font.family: root.fontName
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.letterSpacing: 1
+              }
+
+              Rectangle {
+                id: copyLogsBtn
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                width: copyLogsText.implicitWidth + Style.space(16)
+                height: Style.space(24)
+                radius: Style.cornerRadius
+                color: copyLogsArea.containsMouse ? Style.hoverFillFor(root.fg, Color.accent) : "transparent"
+                border.width: 1
+                border.color: Qt.rgba(root.dim.r, root.dim.g, root.dim.b, 0.5)
+                Text {
+                  id: copyLogsText
+                  anchors.centerIn: parent
+                  text: "Copy"
+                  color: Color.accent
+                  font.family: root.fontName
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+                MouseArea {
+                  id: copyLogsArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.copyLogs()
+                }
+              }
+            }
+
+            Rectangle {
+              width: parent.width
+              radius: Style.cornerRadius
+              color: Qt.rgba(root.dim.r, root.dim.g, root.dim.b, 0.12)
+              border.width: 1
+              border.color: Qt.rgba(root.dim.r, root.dim.g, root.dim.b, 0.35)
+              implicitHeight: Math.min(logScroll.contentHeight + Style.space(12), Style.space(140))
+
+              ScrollView {
+                id: logScroll
+                anchors.fill: parent
+                anchors.margins: Style.space(6)
+                clip: true
+                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                ScrollBar.vertical.policy: logTextItem.implicitHeight > height ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+
+                Text {
+                  id: logTextItem
+                  width: logScroll.availableWidth
+                  text: root.actionLog
+                  textFormat: Text.PlainText
+                  wrapMode: Text.Wrap
+                  color: root.fg
+                  font.family: root.fontName
+                  font.pixelSize: Style.font.caption
+                  opacity: 0.9
                 }
               }
             }

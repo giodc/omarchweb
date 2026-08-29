@@ -2,14 +2,11 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 
-// Bar entry point for OmarchWeb. Globe icon is accent-colored while any
-// managed web service is running, urgent when all are stopped. Clicking
-// opens the control panel (services / databases / virtual hosts).
+// Bar entry point for OmarchWeb. Clicking the globe opens the control panel
+// (services / databases / virtual hosts).
 BarWidget {
   id: root
   moduleName: "io.github.giodc.omarchweb"
-
-  readonly property bool anyRunning: panelLoader.item ? panelLoader.item.anyRunning : false
 
   function injectPanel() {
     var target = panelLoader.item
@@ -63,10 +60,6 @@ BarWidget {
     bar: root.bar
     text: "󰖟"
     slotSize: Style.bar.statusSlot
-    active: root.anyRunning
-    useActiveColor: true
-    activeColor: Color.accent
-    foreground: Color.urgent
     tooltipText: "OmarchWeb"
 
     onPressed: function(b) {
