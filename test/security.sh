@@ -61,6 +61,12 @@ if printf '%s' "$prog" | grep -q "$ROOT"; then
 else
   ok "snapshot installer does not embed the checkout path"
 fi
+if printf '%s' "$prog" | grep -q 'parent=/usr/local/libexec' \
+  && printf '%s' "$prog" | grep -q 'chmod 0755 "\$parent"'; then
+  ok "snapshot installer makes /usr/local/libexec traversable"
+else
+  bad "libexec-traverse" "install program must chmod 0755 /usr/local/libexec for post-install verify"
+fi
 
 echo "== behavioral: descriptor binding (TOCTOU) =="
 
@@ -168,6 +174,79 @@ if printf '%s' "$out" | grep -q 'unknown action'; then
 else
   bad "pacman-u-action" "root.sh pacman-u should be an unknown action; got: $out"
 fi
+
+# A root-run `mariadb`/`psql` accepting caller options is a generic root
+# primitive (--tee writes as root, COPY FROM PROGRAM executes). Only the two
+# narrow grant operations may cross the boundary.
+for act in mariadb postgres; do
+  out="$(scripts/root.sh "$act" -e 'SELECT 1;' 2>&1 || true)"
+  if printf '%s' "$out" | grep -q 'unknown action'; then
+    ok "root.sh rejects the generic '$act' client passthrough"
+  else
+    bad "db-client-passthrough" \
+      "root.sh '$act' must not forward caller arguments to a privileged client; got: $out"
+  fi
+done
+
+if grep -nE 'omarchweb_elevate (mariadb|postgres)([[:space:]]|$)' scripts/*.sh; then
+  bad "db-elevate-passthrough" \
+    "a backend still elevates a raw database client (use grant-mariadb/grant-postgres)."
+else
+  ok "no backend elevates a raw database client"
+fi
+
+for u in root postgres 'ev;il' '' 'a b'; do
+  out="$(scripts/root.sh grant-mariadb "$u" 2>&1 || true)"
+  if printf '%s' "$out" | grep -qE 'invalid database user|usage: root.sh grant-mariadb'; then
+    :
+  else
+    bad "grant-user-validation" "grant-mariadb accepted role '$u'; got: $out"
+    break
+  fi
+done
+ok "grant-mariadb rejects system and non-identifier role names"
+
+# systemctl enable accepts a unit *pathname*, so a smuggled extra argument
+# alongside an allow-listed service would link an arbitrary unit as root.
+smuggled=0
+for args in "start mariadb /tmp/evil.service" "enable mariadb /tmp/evil.service" \
+  "enable --now mariadb /tmp/evil.service" "disable mariadb extra"; do
+  # shellcheck disable=SC2086
+  out="$(scripts/root.sh systemctl $args 2>&1 || true)"
+  if ! printf '%s' "$out" | grep -q 'exactly one service'; then
+    bad "systemctl-extra-args" "root.sh systemctl $args was not refused; got: $out"
+    smuggled=1
+    break
+  fi
+done
+[ "$smuggled" -eq 0 ] && ok "root.sh systemctl takes exactly one allow-listed unit"
+
+if grep -n 'omarchweb_elevate nginx-tune "\$HOME"' scripts/*.sh; then
+  bad "nginx-tune-home-arg" \
+    "nginx-tune still takes a caller-supplied home (it is interpolated into sed over /etc/nginx)."
+else
+  ok "nginx-tune derives the home from the authenticated caller"
+fi
+
+out="$(scripts/root.sh nginx-tune /etc 2>&1 || true)"
+if printf '%s' "$out" | grep -q 'usage: root.sh nginx-tune'; then
+  ok "root.sh nginx-tune refuses a caller-supplied path"
+else
+  bad "nginx-tune-arg" "nginx-tune should take no arguments; got: $out"
+fi
+
+# The vhost document root is the one caller-supplied path root grants ACLs on.
+confined=0
+for r in /etc/evil "$PWD/../etc/evil" relative/path; do
+  out="$(printf 'server {\n    root %s;\n}\n' "$r" \
+    | SUDO_UID=0 scripts/root.sh vhost-install probe probe.test 2>&1 || true)"
+  if ! printf '%s' "$out" | grep -q 'ERROR: vhost root must'; then
+    bad "vhost-docroot" "vhost root '$r' was not refused; got: $out"
+    confined=1
+    break
+  fi
+done
+[ "$confined" -eq 0 ] && ok "vhost document root is confined to the caller's home"
 
 size="$(wc -c < scripts/root.sh)"
 if [ "$size" -lt 1048576 ]; then

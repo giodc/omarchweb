@@ -88,18 +88,16 @@ db() {
   "$DB_BIN" "$@"
 }
 
-db_root() {
+# The helper builds the grant SQL itself; only a validated role name crosses
+# the privilege boundary.
+grant_mariadb() {
+  local user
+  user="$(safe_user)" || return 1
   command -v mariadb >/dev/null 2>&1 || {
     echo "ERROR: mariadb elevation requires the mariadb client" >&2
     return 1
   }
-  omarchweb_elevate mariadb "$@"
-}
-
-grant_mariadb() {
-  local user
-  user="$(safe_user)" || return 1
-  db_root -e "CREATE USER IF NOT EXISTS '$user'@'localhost' IDENTIFIED VIA unix_socket; GRANT ALL PRIVILEGES ON *.* TO '$user'@'localhost' WITH GRANT OPTION; FLUSH PRIVILEGES;"
+  omarchweb_elevate grant-mariadb "$user" >/dev/null
 }
 
 db_privileged() {
@@ -224,18 +222,14 @@ pg() {
   "$PG_BIN" -d postgres -v ON_ERROR_STOP=1 "$@"
 }
 
-pg_root() {
+grant_postgres() {
+  local user
+  user="$(safe_user)" || return 1
   command -v "$PG_BIN" >/dev/null 2>&1 || {
     echo "ERROR: postgresql client (psql) is not installed" >&2
     return 1
   }
-  omarchweb_elevate postgres "$@"
-}
-
-grant_postgres() {
-  local user
-  user="$(safe_user)" || return 1
-  pg_root -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${user}') THEN CREATE ROLE ${user} WITH LOGIN SUPERUSER CREATEDB CREATEROLE; ELSE ALTER ROLE ${user} WITH LOGIN SUPERUSER CREATEDB CREATEROLE; END IF; END \$\$;"
+  omarchweb_elevate grant-postgres "$user" >/dev/null
 }
 
 pg_privileged() {

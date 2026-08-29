@@ -106,8 +106,14 @@ PATH=/usr/bin:/usr/sbin:/bin:/sbin
 umask 077
 dest=/usr/local/libexec/omarchweb/root.sh
 dir=/usr/local/libexec/omarchweb
+parent=/usr/local/libexec
 expected=${omarchweb_helper_sha256}
 mkdir -p "\$dir"
+# Parent is often 0700 on Arch; unprivileged verify (stat/sha256) needs traverse.
+if [ -d "\$parent" ]; then
+  chmod 0755 "\$parent"
+  chown root:root "\$parent"
+fi
 chmod 0755 "\$dir"
 chown root:root "\$dir"
 tmp=\$(mktemp -p "\$dir" .root.XXXXXX)
@@ -152,6 +158,9 @@ omarchweb_ensure_helper() {
   if ! omarchweb_helper_current; then
     echo "ERROR: privileged helper is missing or not the reviewed snapshot" >&2
     echo "ERROR: expected $omarchweb_helper_dest owned by root, digest $omarchweb_helper_sha256" >&2
+    if [ -d /usr/local/libexec ] && [ ! -r /usr/local/libexec ] && [ ! -x /usr/local/libexec ]; then
+      echo "ERROR: /usr/local/libexec is not traversable; retry after: sudo chmod 755 /usr/local/libexec" >&2
+    fi
     return 1
   fi
 }

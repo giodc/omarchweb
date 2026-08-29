@@ -65,6 +65,13 @@ available, otherwise `pkexec`. The plugin checkout is never executed as root.
 If you update the plugin, the next privileged action reinstalls the helper
 when the digest no longer matches.
 
+Every helper operation is narrowly defined: package, service, and PHP
+extension names come from fixed allow-lists, `systemctl` takes exactly one
+allow-listed unit, database grants pass only a validated role name (the SQL is
+built inside the snapshot), a vhost document root must live under the calling
+user's home, and `nginx-tune` derives that home from the authenticated caller
+rather than an argument. There is no generic "run this as root" path.
+
 ## Tests
 
 ```sh
@@ -72,7 +79,7 @@ bash test/security.sh
 ```
 
 These checks encode the marketplace privilege and supply-chain review
-(root-owned helper, pinned artifacts, no generic `install -d`). Run them
+(root-owned helper, pinned artifacts, no generic root primitives). Run them
 before resubmitting.
 
 ## Backends

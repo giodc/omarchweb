@@ -48,6 +48,16 @@ svc_ok() {
   esac
 }
 
+# Database role names are interpolated into SQL built inside this snapshot,
+# so restrict them to characters that cannot terminate an identifier.
+db_user_ok() {
+  case "$1" in
+    *[!A-Za-z0-9_]*|'') return 1 ;;
+    root|mysql|postgres|PUBLIC) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 caller_home() {
   local uid="${PKEXEC_UID:-${SUDO_UID:-}}"
   if [ -n "$uid" ]; then
@@ -128,6 +138,25 @@ ensure_nginx_layout() {
   fi
 }
 
+# A vhost document root is the one caller-supplied path this helper grants
+# ACLs on, so confine it to the calling user's home before touching it.
+docroot_ok() {
+  local docroot="$1" home="$2"
+  [ -n "$docroot" ] || { echo "ERROR: vhost conf has no root directive" >&2; return 1; }
+  [ -n "$home" ] || { echo "ERROR: cannot resolve the calling user's home" >&2; return 1; }
+  case "$docroot" in
+    /*) ;;
+    *) echo "ERROR: vhost root must be absolute: $docroot" >&2; return 1 ;;
+  esac
+  case "$docroot" in
+    *..*) echo "ERROR: vhost root must not contain '..': $docroot" >&2; return 1 ;;
+  esac
+  case "$docroot" in
+    "$home"/*) return 0 ;;
+    *) echo "ERROR: vhost root must live under $home: $docroot" >&2; return 1 ;;
+  esac
+}
+
 # Allow nginx/php-fpm (user http) to traverse home and read the project.
 # Pass "write" as the second argument for apps that must create files
 # (WordPress wp-config.php, uploads, etc).
@@ -190,11 +219,18 @@ reload_nginx() {
 
 vhost_install() {
   local name="$1" host="$2"
-  local body
+  local body home docroot write=""
   name_ok "$name" || { echo "ERROR: invalid vhost name '$name'" >&2; return 1; }
   host_ok "$host" || { echo "ERROR: invalid host '$host'" >&2; return 1; }
   body="$(cat)" || { echo "ERROR: missing generated vhost conf on stdin" >&2; return 1; }
   [ -n "$body" ] || { echo "ERROR: empty vhost conf" >&2; return 1; }
+
+  # Validate the document root before anything is written, so a rejected
+  # conf never leaves a half-enabled vhost behind.
+  home="$(caller_home)"
+  docroot="$(printf '%s\n' "$body" \
+    | sed -n 's/.*root[[:space:]]*\([^;]*\);.*/\1/p' | tr -d ' ' | head -1)"
+  docroot_ok "$docroot" "$home" || return 1
 
   ensure_nginx_layout
   printf '%s\n' "$body" | atomic_replace "$AVAIL/$name"
@@ -202,11 +238,7 @@ vhost_install() {
   if ! grep -Eq "(^|[[:space:]])$host([[:space:]]|$)" /etc/hosts 2>/dev/null; then
     printf '%s\n' "127.0.0.1 $host" >> /etc/hosts
   fi
-  local home docroot
-  home="$(caller_home)"
   repair_vhost_paths "$home"
-  docroot=$(sed -n 's/.*root[[:space:]]*\([^;]*\);.*/\1/p' "$AVAIL/$name" | tr -d ' ' | head -1)
-  local write=""
   if grep -q '^# type wordpress' "$AVAIL/$name" 2>/dev/null || [ -f "$docroot/wp-load.php" ]; then
     write="write"
   fi
@@ -221,30 +253,18 @@ vhost_remove() {
   reload_nginx
 }
 
+# Exactly one allow-listed unit name per call. Extra arguments are refused so
+# a unit pathname can never ride along with an accepted service name.
 do_systemctl() {
   local action="$1"
+  local now=""
   shift
   case "$action" in
-    start|stop|restart|reload|is-active)
-      svc_ok "${1:-}" || { echo "ERROR: unknown service '${1:-}'" >&2; return 1; }
-      systemctl "$action" "$@"
-      ;;
-    enable)
+    start|stop|restart|reload|is-active) ;;
+    enable|disable)
       if [ "${1:-}" = "--now" ]; then
-        svc_ok "${2:-}" || { echo "ERROR: unknown service '${2:-}'" >&2; return 1; }
-        systemctl enable --now "$2"
-      else
-        svc_ok "${1:-}" || { echo "ERROR: unknown service '${1:-}'" >&2; return 1; }
-        systemctl enable "$@"
-      fi
-      ;;
-    disable)
-      if [ "${1:-}" = "--now" ]; then
-        svc_ok "${2:-}" || { echo "ERROR: unknown service '${2:-}'" >&2; return 1; }
-        systemctl disable --now "$2"
-      else
-        svc_ok "${1:-}" || { echo "ERROR: unknown service '${1:-}'" >&2; return 1; }
-        systemctl disable "$@"
+        now="--now"
+        shift
       fi
       ;;
     *)
@@ -252,6 +272,16 @@ do_systemctl() {
       return 1
       ;;
   esac
+  [ "$#" -eq 1 ] || {
+    echo "ERROR: systemctl $action takes exactly one service" >&2
+    return 1
+  }
+  svc_ok "$1" || { echo "ERROR: unknown service '$1'" >&2; return 1; }
+  if [ -n "$now" ]; then
+    systemctl "$action" "$now" "$1"
+  else
+    systemctl "$action" "$1"
+  fi
 }
 
 do_pacman() {
@@ -379,6 +409,41 @@ enable_php_ext() {
   echo "OK: enabled php extensions: $*"
 }
 
+# The only privileged database operations the panel needs: give the calling
+# user a local socket/peer account. SQL is built here from a validated role
+# name, so no caller-supplied SQL or client option ever reaches root.
+grant_mariadb_user() {
+  local user="$1"
+  db_user_ok "$user" || { echo "ERROR: invalid database user '$user'" >&2; return 1; }
+  command -v mariadb >/dev/null 2>&1 || { echo "ERROR: mariadb not installed" >&2; return 1; }
+  printf '%s\n' \
+    "CREATE USER IF NOT EXISTS '$user'@'localhost' IDENTIFIED VIA unix_socket;" \
+    "GRANT ALL PRIVILEGES ON *.* TO '$user'@'localhost' WITH GRANT OPTION;" \
+    "FLUSH PRIVILEGES;" \
+    | mariadb
+  echo "OK: MariaDB socket access granted for '$user'"
+}
+
+grant_postgres_role() {
+  local user="$1"
+  db_user_ok "$user" || { echo "ERROR: invalid database user '$user'" >&2; return 1; }
+  command -v psql >/dev/null 2>&1 || { echo "ERROR: postgresql is not installed" >&2; return 1; }
+  local sql
+  sql="DO \$\$ BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$user') THEN
+    CREATE ROLE $user WITH LOGIN SUPERUSER CREATEDB CREATEROLE;
+  ELSE
+    ALTER ROLE $user WITH LOGIN SUPERUSER CREATEDB CREATEROLE;
+  END IF;
+END \$\$;"
+  if command -v runuser >/dev/null 2>&1; then
+    printf '%s\n' "$sql" | runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 -q
+  else
+    printf '%s\n' "$sql" | su -s /usr/bin/bash postgres -c 'exec psql -d postgres -v ON_ERROR_STOP=1 -q'
+  fi
+  echo "OK: PostgreSQL role granted for '$user'"
+}
+
 init_mariadb() {
   if [ -f /usr/lib/systemd/system/mariadb.service ] && \
      [ ! -d /var/lib/mysql/mysql ] && command -v mariadb-install-db >/dev/null 2>&1; then
@@ -400,7 +465,10 @@ init_postgres() {
 
 case "${1:-}" in
   nginx-tune)
-    home="${2:-$(caller_home)}"
+    [ "$#" -eq 1 ] || { echo "usage: root.sh nginx-tune" >&2; exit 1; }
+    # Derived from the authenticated caller, never from an argument: this path
+    # is interpolated into sed expressions over /etc/nginx configs.
+    home="$(caller_home)"
     ensure_nginx_layout
     repair_vhost_paths "$home"
     reload_nginx
@@ -436,19 +504,13 @@ case "${1:-}" in
     [ "$#" -eq 1 ] || { echo "usage: root.sh remove-mailpit" >&2; exit 1; }
     do_remove_mailpit
     ;;
-  mariadb)
-    shift
-    command -v mariadb >/dev/null 2>&1 || { echo "ERROR: mariadb not installed" >&2; exit 1; }
-    mariadb "$@"
+  grant-mariadb)
+    [ "$#" -eq 2 ] || { echo "usage: root.sh grant-mariadb <user>" >&2; exit 1; }
+    grant_mariadb_user "$2"
     ;;
-  postgres)
-    shift
-    command -v psql >/dev/null 2>&1 || { echo "ERROR: postgresql is not installed" >&2; exit 1; }
-    if command -v runuser >/dev/null 2>&1; then
-      runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 "$@"
-    else
-      su -s /usr/bin/bash postgres -c 'exec psql -d postgres -v ON_ERROR_STOP=1 "$@"' -- "$@"
-    fi
+  grant-postgres)
+    [ "$#" -eq 2 ] || { echo "usage: root.sh grant-postgres <user>" >&2; exit 1; }
+    grant_postgres_role "$2"
     ;;
   init-mariadb) init_mariadb ;;
   init-postgres) init_postgres ;;
@@ -459,7 +521,7 @@ case "${1:-}" in
     ;;
   *)
     echo "unknown action: ${1:-}" >&2
-    echo "usage: root.sh vhost-install|vhost-remove|nginx-tune|systemctl|pacman|pacman-r|install-mailpit|remove-mailpit|mariadb|postgres|init-mariadb|init-postgres|php-ext" >&2
+    echo "usage: root.sh vhost-install|vhost-remove|nginx-tune|systemctl|pacman|pacman-r|install-mailpit|remove-mailpit|grant-mariadb|grant-postgres|init-mariadb|init-postgres|php-ext" >&2
     exit 1
     ;;
 esac

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.giodc.omarchweb",
   "name": "OmarchWeb",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "author": "giodc",
   "license": "MIT",
   "description": "Web development control panel: start/stop/restart PHP-FPM, MariaDB, Nginx, PostgreSQL, Redis, and Mailpit; create/delete databases and app users; add PHP, Laravel, WordPress, or Node virtual hosts — from a native Omarchy bar panel.",

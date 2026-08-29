@@ -240,7 +240,7 @@ case "${1:-}" in
     add_vhost "$@"
     ;;
   tune)
-    omarchweb_elevate nginx-tune "$HOME"
+    omarchweb_elevate nginx-tune
     ;;
   remove)
     [ "$#" -lt 2 ] && { echo "usage: vhost.sh remove <name>" >&2; exit 1; }
