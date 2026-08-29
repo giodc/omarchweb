@@ -1,6 +1,7 @@
 // OmarchWeb — JS helpers: parsing script output into view models.
 
-// Parse `services.sh status` output: "name kind state substate" per line.
+// Parse `services.sh status` output: "name kind state substate autostart".
+// SubState arrives as "-" when empty so autostart stays positional.
 function parseServiceStatus(raw, known) {
   // known: [{ key, name, icon, kind }...]
   var lines = String(raw).split("\n")
@@ -14,7 +15,9 @@ function parseServiceStatus(raw, known) {
     var kind = parts[1]
     var active = parts[2]
     var sub = parts.length > 3 ? parts[3] : ""
-    state[svc] = { key: svc, kind: kind, state: active, sub: sub }
+    if (sub === "-") sub = ""
+    var enabled = parts.length > 4 ? parts[4] : "unknown"
+    state[svc] = { key: svc, kind: kind, state: active, sub: sub, enabled: enabled }
   }
   var out = []
   for (var j = 0; j < known.length; j++) {
@@ -29,12 +32,15 @@ function parseServiceStatus(raw, known) {
         running: s.state === "active",
         state: s.state,
         sub: s.sub,
+        autostart: s.enabled === "enabled",
+        autostartFixed: s.enabled === "static" || s.enabled === "unknown",
         url: k.url || ""
       })
     } else {
       out.push({
         key: k.key, name: k.name, icon: k.icon,
         installed: false, running: false, state: "unknown", sub: "",
+        autostart: false, autostartFixed: true,
         url: k.url || ""
       })
     }

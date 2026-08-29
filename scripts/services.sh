@@ -8,8 +8,9 @@
 # does not exist at all.
 #
 # Usage:
-#   services.sh status [service...]   print one "name kind state" line per service
+#   services.sh status [service...]   print one "name kind state sub autostart" line
 #   services.sh start|stop|restart <service>
+#   services.sh enable|disable <service>   turn boot autostart on or off
 #   services.sh installed <service>   exit 0 if the unit file exists
 #   services.sh setup                 run the one-shot setup (install deps)
 #
@@ -58,25 +59,64 @@ unit_active_state() {
   esac
 }
 
+# Arch ships redis.service as an alias of valkey.service, and is-enabled
+# answers "alias" when asked through the alias name. Resolve to the unit
+# systemd actually tracks before asking about autostart.
+canonical_unit() {
+  local scope="$1" svc="$2" id=""
+  if [ "$scope" = "user" ]; then
+    id="$(systemctl --user show -p Id --value "$svc" 2>/dev/null || true)"
+  else
+    id="$(systemctl show -p Id --value "$svc" 2>/dev/null || true)"
+  fi
+  id="${id%%$'\n'*}"
+  [ -n "$id" ] || id="$svc"
+  printf '%s\n' "$id"
+}
+
+# Whether the unit starts at boot. Collapsed to enabled/disabled/static so the
+# panel can show a toggle only where flipping it means something.
+unit_enabled_state() {
+  local scope="$1" svc="$2" state="" unit
+  unit="$(canonical_unit "$scope" "$svc")"
+  if [ "$scope" = "user" ]; then
+    state="$(systemctl --user is-enabled "$unit" 2>/dev/null || true)"
+  else
+    state="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+  fi
+  state="${state%%$'\n'*}"
+  case "$state" in
+    enabled|enabled-runtime|linked|linked-runtime|generated) printf 'enabled\n' ;;
+    disabled|masked|masked-runtime) printf 'disabled\n' ;;
+    static|indirect|transient) printf 'static\n' ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+# Fields: name kind active-state sub-state autostart. SubState is emitted as
+# "-" when empty so the trailing autostart field stays positional.
 status_line() {
   local svc="$1"
   local kind
   kind="$(unit_kind "$svc")"
   local state="not-installed"
   local sub=""
+  local enabled="unknown"
 
   case "$kind" in
     system)
       state="$(unit_active_state system "$svc")"
       sub="$(systemctl show -p SubState --value "$svc" 2>/dev/null || true)"
+      enabled="$(unit_enabled_state system "$svc")"
       ;;
     user)
       state="$(unit_active_state user "$svc")"
       sub="$(systemctl --user show -p SubState --value "$svc" 2>/dev/null || true)"
+      enabled="$(unit_enabled_state user "$svc")"
       ;;
   esac
 
-  printf '%s %s %s %s\n' "$svc" "$kind" "$state" "$sub"
+  printf '%s %s %s %s %s\n' "$svc" "$kind" "$state" "${sub:--}" "$enabled"
 }
 
 do_action() {
@@ -112,13 +152,19 @@ case "${1:-}" in
     [ "$#" -lt 2 ] && { echo "usage: services.sh $1 <service>" >&2; exit 1; }
     do_action "$1" "$2"
     ;;
+  enable|disable)
+    # Autostart only: start/stop stay runtime-only so a service can be
+    # stopped for this session without losing its boot configuration.
+    [ "$#" -lt 2 ] && { echo "usage: services.sh $1 <service>" >&2; exit 1; }
+    do_action "$1" "$2"
+    ;;
   installed)
     [ "$#" -lt 2 ] && { echo "usage: services.sh installed <service>" >&2; exit 1; }
     [ "$(unit_kind "$2")" != "none" ]
     ;;
   *)
     echo "unknown action: ${1:-}" >&2
-    echo "usage: services.sh status [service...] | start|stop|restart <service> | installed <service>" >&2
+    echo "usage: services.sh status [service...] | start|stop|restart <service> | enable|disable <service> | installed <service>" >&2
     exit 1
     ;;
 esac

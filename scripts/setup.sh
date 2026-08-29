@@ -56,9 +56,11 @@ install_mailpit_release() {
   return $rc
 }
 
-enable_svc() {
-  omarchweb_elevate systemctl enable --now "$1" \
-    || omarchweb_elevate systemctl start "$1"
+# Start the service for this session but leave boot autostart off. Installing
+# a dev stack should not silently add services to every boot; the panel's
+# per-service "Boot" toggle opts in.
+start_svc() {
+  omarchweb_elevate systemctl start "$1"
 }
 
 disable_svc() {
@@ -102,7 +104,7 @@ install_service() {
       ;;
     *) echo "unknown service: $svc" >&2; return 1 ;;
   esac
-  enable_svc "$svc"
+  start_svc "$svc"
 }
 
 uninstall_service() {

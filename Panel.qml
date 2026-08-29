@@ -43,8 +43,19 @@ Panel {
     { key: "nginx",    name: "Nginx",     icon: "󰈂" },
     { key: "postgresql", name: "PostgreSQL", icon: "" },
     { key: "redis",    name: "Redis",     icon: "󰍥" },
-    { key: "mailpit",  name: "Mailpit",   icon: "󰇮", url: "http://127.0.0.1:8025" }
+    { key: "mailpit",  name: "Mailpit",   icon: "󰇮" }
   ]
+  readonly property string mailpitUrl: "http://127.0.0.1:8025"
+  readonly property string mailpitSmtpCopy: "Host: 127.0.0.1\nPort: 1025\nEncryption: none\nUsername:\nPassword:"
+  readonly property string mailpitLaravelCopy: "MAIL_MAILER=smtp\nMAIL_HOST=127.0.0.1\nMAIL_PORT=1025\nMAIL_ENCRYPTION=null\nMAIL_USERNAME=null\nMAIL_PASSWORD=null"
+  readonly property var mailpitSmtpRows: [
+    { label: "Host", value: "127.0.0.1" },
+    { label: "Port", value: "1025" },
+    { label: "Encryption", value: "none" },
+    { label: "Username", value: "(empty)" },
+    { label: "Password", value: "(empty)" }
+  ]
+  readonly property bool mailpitTabOpen: tab === "mailpit"
 
   // ---- Databases state ----
   property var databases: []
@@ -63,6 +74,8 @@ Panel {
       tabs.push({ key: "mariadb", label: "MariaDB" })
     if (root.serviceInstalled("postgresql"))
       tabs.push({ key: "postgresql", label: "PostgreSQL" })
+    if (root.serviceRunning("mailpit"))
+      tabs.push({ key: "mailpit", label: "Mailpit" })
     tabs.push({ key: "vhosts", label: "Vhosts" })
     return tabs
   }
@@ -141,6 +154,13 @@ Panel {
     setNotice("logs copied to clipboard", false)
   }
 
+  function copyText(text, message) {
+    var s = String(text || "")
+    if (!s) return
+    Quickshell.execDetached(["bash", "-c", "printf %s " + Util.shellQuote(s) + " | wl-copy"])
+    setNotice(message || "copied to clipboard", false)
+  }
+
   function scriptPath(name) {
     var url = Qt.resolvedUrl("scripts/" + name)
     var s = String(url)
@@ -208,6 +228,11 @@ Panel {
     if (dbEngine === "") dbEngine = "mariadb"
   }
 
+  function ensureMailpitTab() {
+    if (tab === "mailpit" && servicesLoaded && !serviceRunning("mailpit"))
+      tab = "services"
+  }
+
   // ---- Service actions ----
   property string actingService: ""
   function actService(key, action) {
@@ -220,6 +245,9 @@ Panel {
   function startService(key) { actService(key, "start") }
   function stopService(key) { actService(key, "stop") }
   function restartService(key) { actService(key, "restart") }
+  // Autostart is independent of the running state: start/stop last until
+  // reboot, enable/disable decide what comes back afterwards.
+  function setAutostart(key, on) { actService(key, on ? "enable" : "disable") }
 
   // ---- Database actions ----
   property string newDbName: ""
@@ -366,6 +394,7 @@ Panel {
         root.services = Model.parseServiceStatus(text, root.serviceKinds)
         root.servicesLoaded = true
         root.ensureDbEngine()
+        root.ensureMailpitTab()
       }
     }
   }
@@ -842,27 +871,37 @@ Panel {
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: Style.space(6)
 
+                    // Boot autostart, separate from the running state above.
                     Rectangle {
-                      visible: svcRow.modelData.running && svcRow.modelData.url
-                      width: openSvcBtn.implicitWidth + Style.space(16)
+                      visible: svcRow.modelData.installed
+                        && !svcRow.modelData.autostartFixed
+                        && root.installingService !== svcRow.modelData.key
+                      width: autostartBtn.implicitWidth + Style.space(16)
                       height: Style.space(24)
                       radius: Style.cornerRadius
-                      color: openSvcArea.containsMouse ? Style.hoverFillFor(root.fg, Color.accent) : "transparent"
+                      color: autostartArea.containsMouse
+                        ? Style.hoverFillFor(root.fg, Color.accent)
+                        : "transparent"
+                      border.width: 1
+                      border.color: svcRow.modelData.autostart
+                        ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.9)
+                        : Qt.rgba(root.dim.r, root.dim.g, root.dim.b, 0.4)
                       Text {
-                        id: openSvcBtn
+                        id: autostartBtn
                         anchors.centerIn: parent
-                        text: "Open"
-                        color: Color.accent
+                        text: svcRow.modelData.autostart ? "Boot: on" : "Boot: off"
+                        color: svcRow.modelData.autostart ? Color.accent : root.dim
                         font.family: root.fontName
                         font.pixelSize: Style.font.caption
                         font.bold: true
                       }
                       MouseArea {
-                        id: openSvcArea
+                        id: autostartArea
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.openUrl(svcRow.modelData.url)
+                        onClicked: root.setAutostart(svcRow.modelData.key,
+                          !svcRow.modelData.autostart)
                       }
                     }
 
@@ -1333,6 +1372,216 @@ Panel {
                   propagateComposedEvents: true
                 }
               }
+            }
+          }
+
+          // ================= MAILPIT TAB =================
+          Column {
+            visible: root.mailpitTabOpen
+            width: parent.width
+            height: visible ? implicitHeight : 0
+            spacing: Style.space(8)
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Column {
+                width: parent.width - openMailpitBtn.width - Style.space(8)
+                spacing: Style.space(2)
+                Text {
+                  width: parent.width
+                  text: "Inbox"
+                  color: root.fg
+                  font.family: root.fontName
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                }
+                Text {
+                  width: parent.width
+                  text: "caught mail at " + root.mailpitUrl
+                  color: root.dim
+                  font.family: root.fontName
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
+                }
+              }
+
+              Rectangle {
+                id: openMailpitBtn
+                width: openMailpitText.implicitWidth + Style.space(20)
+                height: Style.space(28)
+                radius: Style.cornerRadius
+                color: openMailpitArea.containsMouse ? Style.hoverFillFor(root.fg, Color.accent) : "transparent"
+                border.width: 1
+                border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.9)
+                Text {
+                  id: openMailpitText
+                  anchors.centerIn: parent
+                  text: "Open"
+                  color: Color.accent
+                  font.family: root.fontName
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+                MouseArea {
+                  id: openMailpitArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.openUrl(root.mailpitUrl)
+                }
+              }
+            }
+
+            PanelSectionHeader {
+              text: "SMTP SETUP"
+              foreground: root.fg
+              fontFamily: root.fontName
+            }
+
+            Text {
+              width: parent.width
+              text: "Point local apps at Mailpit instead of a real mail server. No TLS and no login."
+              color: root.dim
+              font.family: root.fontName
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Repeater {
+              model: root.mailpitSmtpRows
+
+              Row {
+                required property var modelData
+                width: parent.width
+                spacing: Style.space(12)
+                Text {
+                  width: Style.space(90)
+                  text: modelData.label
+                  color: root.dim
+                  font.family: root.fontName
+                  font.pixelSize: Style.font.caption
+                }
+                Text {
+                  text: modelData.value
+                  color: root.fg
+                  font.family: root.fontName
+                  font.pixelSize: Style.font.body
+                }
+              }
+            }
+
+            Rectangle {
+              width: Math.max(Style.space(120), copySmtpText.implicitWidth + Style.space(28))
+              height: Style.space(32)
+              radius: Style.cornerRadius
+              color: copySmtpArea.containsMouse
+                ? Qt.lighter(Color.accent, 1.18)
+                : Color.accent
+              border.width: 1
+              border.color: Qt.lighter(Color.accent, 1.25)
+              Text {
+                id: copySmtpText
+                anchors.centerIn: parent
+                text: "Copy SMTP"
+                color: Color.background
+                font.family: root.fontName
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
+              }
+              MouseArea {
+                id: copySmtpArea
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.copyText(root.mailpitSmtpCopy, "SMTP settings copied")
+              }
+            }
+
+            PanelSectionHeader {
+              text: "APPS"
+              foreground: root.fg
+              fontFamily: root.fontName
+            }
+
+            Text {
+              width: parent.width
+              text: "Laravel (.env)"
+              color: root.fg
+              font.family: root.fontName
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
+            Text {
+              width: parent.width
+              text: root.mailpitLaravelCopy
+              color: root.dim
+              font.family: root.fontName
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+            Rectangle {
+              width: Math.max(Style.space(120), copyLaravelText.implicitWidth + Style.space(28))
+              height: Style.space(32)
+              radius: Style.cornerRadius
+              color: copyLaravelArea.containsMouse
+                ? Qt.lighter(Color.accent, 1.18)
+                : Color.accent
+              border.width: 1
+              border.color: Qt.lighter(Color.accent, 1.25)
+              Text {
+                id: copyLaravelText
+                anchors.centerIn: parent
+                text: "Copy Laravel"
+                color: Color.background
+                font.family: root.fontName
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
+              }
+              MouseArea {
+                id: copyLaravelArea
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.copyText(root.mailpitLaravelCopy, "Laravel .env copied")
+              }
+            }
+
+            Text {
+              width: parent.width
+              topPadding: Style.space(4)
+              text: "WordPress"
+              color: root.fg
+              font.family: root.fontName
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
+            Text {
+              width: parent.width
+              text: "Use WP Mail SMTP (or similar): host 127.0.0.1, port 1025, encryption none, leave user and password empty."
+              color: root.dim
+              font.family: root.fontName
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Text {
+              width: parent.width
+              topPadding: Style.space(4)
+              text: "PHP"
+              color: root.fg
+              font.family: root.fontName
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
+            Text {
+              width: parent.width
+              text: "php.ini: SMTP = 127.0.0.1  ·  smtp_port = 1025\nmail() without SMTP still bypasses Mailpit — prefer an SMTP library or plugin."
+              color: root.dim
+              font.family: root.fontName
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
           }
 
