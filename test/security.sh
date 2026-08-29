@@ -120,6 +120,15 @@ else
   bad "wordpress-pins" "missing version, digest, or download size limit"
 fi
 
+if grep -q 'omarchweb_open_pinned' scripts/vhost.sh \
+  && grep -q 'OMARCHWEB_PINNED_FD' scripts/vhost.sh \
+  && ! grep -nE 'tar -xzf "\$tmp/wordpress' scripts/vhost.sh; then
+  ok "WordPress extract is descriptor-bound after digest verify"
+else
+  bad "wordpress-pathname" \
+    "vhost.sh must extract WordPress from a digest-pinned fd, not the download pathname."
+fi
+
 if grep -n 'laravel/installer"' scripts/setup.sh | grep -v "${OMARCHWEB_LARAVEL_INSTALLER_VERSION}"; then
   bad "composer-unpinned" "composer require must pin laravel/installer:${OMARCHWEB_LARAVEL_INSTALLER_VERSION}"
 elif grep -q "laravel/installer:\${OMARCHWEB_LARAVEL_INSTALLER_VERSION}" scripts/setup.sh; then
@@ -154,11 +163,11 @@ fi
 
 echo "== static: generic root filesystem primitive =="
 
-if grep -nE 'install-dir|install -d "\$\{' scripts/*.sh; then
+if grep -nE 'install-dir|install -d' scripts/*.sh; then
   bad "generic-install-d" \
-    "privileged helper still forwards arguments to install -d (review: allowlisted paths only)."
+    "privileged helper still uses install -d (review: allowlisted mkdir/chown of exact paths)."
 else
-  ok "no generic install-dir / install -d \"\${...}\" primitive"
+  ok "no generic install-dir / install -d primitive"
 fi
 
 out="$(scripts/root.sh install-dir /tmp/omarchweb-should-not-exist 2>&1 || true)"
@@ -233,6 +242,20 @@ if printf '%s' "$out" | grep -q 'usage: root.sh nginx-tune'; then
   ok "root.sh nginx-tune refuses a caller-supplied path"
 else
   bad "nginx-tune-arg" "nginx-tune should take no arguments; got: $out"
+fi
+
+out="$(scripts/root.sh init-postgres /etc 2>&1 || true)"
+if printf '%s' "$out" | grep -q 'usage: root.sh init-postgres'; then
+  ok "root.sh init-postgres refuses extra arguments"
+else
+  bad "init-postgres-arg" "init-postgres should take no arguments; got: $out"
+fi
+
+out="$(scripts/root.sh init-mariadb /var/lib/mysql 2>&1 || true)"
+if printf '%s' "$out" | grep -q 'usage: root.sh init-mariadb'; then
+  ok "root.sh init-mariadb refuses extra arguments"
+else
+  bad "init-mariadb-arg" "init-mariadb should take no arguments; got: $out"
 fi
 
 # The vhost document root is the one caller-supplied path root grants ACLs on.

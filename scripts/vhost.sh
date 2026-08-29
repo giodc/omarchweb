@@ -143,22 +143,31 @@ install_wordpress() {
     rm -rf "$tmp"
     return 1
   fi
+  if ! omarchweb_open_pinned "$tmp/wordpress.tar.gz" "$OMARCHWEB_WP_SHA256"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  # SHA-1 and tar open /proc/self/fd/N (new description, offset 0) so the
+  # pinned fd is not consumed and a replaced pathname cannot change the bytes.
   if command -v sha1sum >/dev/null 2>&1; then
     local sha1
-    sha1="$(sha1sum -- "$tmp/wordpress.tar.gz" | awk '{print $1}')"
+    sha1="$(sha1sum -- "/proc/self/fd/$OMARCHWEB_PINNED_FD" | awk '{print $1}')"
     if [ "$sha1" != "$OMARCHWEB_WP_SHA1" ]; then
+      exec {OMARCHWEB_PINNED_FD}<&-
       echo "ERROR: WordPress SHA1 mismatch" >&2
       rm -rf "$tmp"
       return 1
     fi
   fi
-
-  if ! tar -xzf "$tmp/wordpress.tar.gz" -C "$tmp" --no-same-owner wordpress \
-      || [ ! -d "$tmp/wordpress" ]; then
+  if ! tar -xzf "/proc/self/fd/$OMARCHWEB_PINNED_FD" -C "$tmp" \
+        --no-same-owner --no-same-permissions wordpress \
+      || [ ! -d "$tmp/wordpress" ] || [ -L "$tmp/wordpress" ]; then
+    exec {OMARCHWEB_PINNED_FD}<&-
     echo "ERROR: failed to extract WordPress" >&2
     rm -rf "$tmp"
     return 1
   fi
+  exec {OMARCHWEB_PINNED_FD}<&-
   if ! cp -a "$tmp/wordpress/." "$dest/"; then
     echo "ERROR: failed to copy WordPress into $dest" >&2
     rm -rf "$tmp"

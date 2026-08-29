@@ -156,7 +156,7 @@ case "${1:-}" in
 
       # Best-effort Laravel installer via Composer (pinned; user-level, not root).
       if command -v composer >/dev/null 2>&1 && ! command -v laravel >/dev/null 2>&1; then
-        composer global require --no-interaction \
+        composer global require --no-interaction --prefer-dist \
           "laravel/installer:${OMARCHWEB_LARAVEL_INSTALLER_VERSION}" 2>/dev/null || true
       fi
       echo "OK: setup complete. See OmarchWeb panel to start services."

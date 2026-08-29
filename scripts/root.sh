@@ -277,10 +277,16 @@ do_systemctl() {
     return 1
   }
   svc_ok "$1" || { echo "ERROR: unknown service '$1'" >&2; return 1; }
+  # Resolve the allow-listed name to the unit systemd tracks: enable/disable
+  # on an alias (redis -> valkey on Arch) does not touch the real unit.
+  local unit
+  unit="$(systemctl show -p Id --value "$1" 2>/dev/null || true)"
+  unit="${unit%%$'\n'*}"
+  [ -n "$unit" ] || unit="$1"
   if [ -n "$now" ]; then
-    systemctl "$action" "$now" "$1"
+    systemctl "$action" "$now" "$unit"
   else
-    systemctl "$action" "$1"
+    systemctl "$action" "$unit"
   fi
 }
 
@@ -454,7 +460,9 @@ init_mariadb() {
 init_postgres() {
   if [ -f /usr/lib/systemd/system/postgresql.service ] && \
      [ ! -d /var/lib/postgres/data ]; then
-    install -d -o postgres -g postgres /var/lib/postgres/data
+    mkdir -p /var/lib/postgres/data
+    chown postgres:postgres /var/lib/postgres/data
+    chmod 0700 /var/lib/postgres/data
     if command -v runuser >/dev/null 2>&1; then
       runuser -u postgres -- initdb -D /var/lib/postgres/data -E UTF8 --locale=C.UTF-8 || true
     else
@@ -512,8 +520,14 @@ case "${1:-}" in
     [ "$#" -eq 2 ] || { echo "usage: root.sh grant-postgres <user>" >&2; exit 1; }
     grant_postgres_role "$2"
     ;;
-  init-mariadb) init_mariadb ;;
-  init-postgres) init_postgres ;;
+  init-mariadb)
+    [ "$#" -eq 1 ] || { echo "usage: root.sh init-mariadb" >&2; exit 1; }
+    init_mariadb
+    ;;
+  init-postgres)
+    [ "$#" -eq 1 ] || { echo "usage: root.sh init-postgres" >&2; exit 1; }
+    init_postgres
+    ;;
   php-ext)
     shift
     [ "$#" -ge 1 ] || { echo "usage: root.sh php-ext <ext...>" >&2; exit 1; }
