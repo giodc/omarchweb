@@ -9,7 +9,7 @@
 OMARCHWEB_HELPER_DEST="/usr/local/libexec/omarchweb/root.sh"
 # Filled after root.sh is hashed; test/security.sh checks it matches.
 # After editing scripts/root.sh, run: sha256sum scripts/root.sh
-OMARCHWEB_HELPER_SHA256="1574c52cd1c89dcac897d5c8d5fe63fa62f224cbd79fd0326e3520f6178743f2"
+OMARCHWEB_HELPER_SHA256="659a6316c2ef518a4944847edb08082097e6bef2bf815f1e7f1dea8994231228"
 
 OMARCHWEB_WP_VERSION="7.1"
 OMARCHWEB_WP_URL="https://wordpress.org/wordpress-7.1.tar.gz"

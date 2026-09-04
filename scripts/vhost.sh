@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # OmarchWeb — virtual host management backend (Nginx).
 #
-# Generates an nginx server block for a PHP, Laravel, WordPress, or Node
+# Generates an nginx server block for a PHP, Laravel, or WordPress
 # project and enables it via sites-available/sites-enabled. PHP/Laravel
 # vhosts get a project folder; WordPress vhosts download a pinned release
 # (scripts/pins.sh) and verify its digest before extract.
@@ -10,7 +10,7 @@
 #   OMARCHWEB_WEB_ROOT   base dir for projects           (default: ~/Web)
 #   OMARCHWEB_NGINX_DIR  nginx config dir                (default: /etc/nginx)
 #   OMARCHWEB_PORT       listen port for vhosts          (default: 80)
-#   OMARCHWEB_FPM_SOCK   php-fpm socket                  (default: unix:/run/php-fpm/php-fpm.sock)
+#   OMARCHWEB_FPM_SOCK   php-fpm socket (default: per-user OmarchWeb pool)
 #
 # The privileged parts (writing nginx configs, /etc/hosts, reloading nginx)
 # run through the root-owned helper snapshot via passwordless sudo when
@@ -23,9 +23,24 @@ set -u
 WEB_ROOT="${OMARCHWEB_WEB_ROOT:-$HOME/Web}"
 NGINX_DIR="${OMARCHWEB_NGINX_DIR:-/etc/nginx}"
 PORT="${OMARCHWEB_PORT:-80}"
-FPM_SOCK="${OMARCHWEB_FPM_SOCK:-unix:/run/php-fpm/php-fpm.sock}"
+
+fpm_sock_for_user() {
+  local u="${1:-${USER:-}}"
+  printf 'unix:/run/php-fpm/omarchweb-%s.sock' "$u"
+}
+
+FPM_SOCK="${OMARCHWEB_FPM_SOCK:-$(fpm_sock_for_user)}"
 AVAIL="$NGINX_DIR/sites-available"
 ENABLED="$NGINX_DIR/sites-enabled"
+
+ensure_php_fpm_pool() {
+  omarchweb_elevate php-fpm-pool-ensure
+}
+
+prepare_php_vhost() {
+  ensure_php_fpm_pool || return 1
+  FPM_SOCK="$(fpm_sock_for_user)"
+}
 
 name_ok() {
   case "$1" in
@@ -75,10 +90,8 @@ list_vhosts() {
         type="wordpress"
       elif grep -q 'fastcgi_pass' "$AVAIL/$f"; then
         type="php"
-      elif grep -q 'proxy_pass' "$AVAIL/$f"; then
-        type="node"
       else
-        type="static"
+        type="other"
       fi
     fi
     printf '%s|%s|%s|%s\n' "$f" "$type" "$host" "$root"
@@ -86,8 +99,8 @@ list_vhosts() {
 }
 
 render_block() {
-  local name="$1" type="$2" host="$3" root="$4" proxy_port="$5"
-  local kind="${6:-$type}"
+  local name="$1" type="$2" host="$3" root="$4"
+  local kind="${5:-$type}"
   cat <<EOF
 # managed by OmarchWeb
 # type $kind
@@ -102,29 +115,83 @@ server {
         try_files \$uri \$uri/ /index.php?\$query_string;
     }
 
-EOF
-  if [ "$type" = "php" ]; then
-    cat <<EOF
     location ~ \.php$ {
         fastcgi_pass $FPM_SOCK;
         fastcgi_index index.php;
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
     }
+}
 EOF
-  elif [ "$type" = "node" ]; then
-    cat <<EOF
-    location / {
-        proxy_pass http://127.0.0.1:$proxy_port;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host \$host;
-        proxy_cache_bypass \$http_upgrade;
-    }
-EOF
-  fi
-  echo "}"
+}
+
+# WordPress asks for FTP when PHP-FPM (user http) cannot write, or when it
+# refuses the "direct" filesystem method because files are owned by the
+# desktop user. Force direct I/O with a fixed define — never caller text.
+ensure_wordpress_direct_fs() {
+  local dest="$1" f marker inserted
+  [ -n "$dest" ] && [ -d "$dest" ] || return 0
+  marker="/* That's all, stop editing!"
+  for f in "$dest/wp-config.php" "$dest/wp-config-sample.php"; do
+    [ -f "$f" ] || continue
+    [ ! -L "$f" ] || continue
+    if grep -Eq "^[[:space:]]*define[[:space:]]*\([[:space:]]*['\"]FS_METHOD['\"]" "$f"; then
+      continue
+    fi
+    inserted="$(mktemp -p "$(dirname -- "$f")" ".wp-config.XXXXXX")" || return 1
+    if grep -Fq "$marker" "$f"; then
+      if ! awk -v marker="$marker" '
+        index($0, marker) && !done {
+          print "define('\''FS_METHOD'\'', '\''direct'\'');"
+          print ""
+          done=1
+        }
+        { print }
+      ' "$f" > "$inserted"; then
+        rm -f -- "$inserted"
+        return 1
+      fi
+    else
+      if ! { cat "$f"; printf '\n%s\n' "define('FS_METHOD', 'direct');"; } > "$inserted"; then
+        rm -f -- "$inserted"
+        return 1
+      fi
+    fi
+    chmod --reference="$f" "$inserted" 2>/dev/null || chmod 0644 -- "$inserted"
+    if ! mv -f -- "$inserted" "$f"; then
+      rm -f -- "$inserted"
+      return 1
+    fi
+    echo "OK: set FS_METHOD=direct in $f"
+  done
+}
+
+# Allow php-fpm (http) to write plugins/uploads. Recalculates the ACL mask so
+# a stale mask::r-x cannot silently drop the named-user write bit.
+apply_wordpress_http_acls() {
+  local dest="$1"
+  [ -n "$dest" ] && [ -d "$dest" ] || return 0
+  id http >/dev/null 2>&1 || return 0
+  command -v setfacl >/dev/null 2>&1 || return 0
+  setfacl -R -m u:http:rwX -m m::rwx "$dest" 2>/dev/null || true
+  setfacl -R -d -m u:http:rwX -m m::rwx "$dest" 2>/dev/null || true
+}
+
+# Re-apply FS_METHOD + ACLs on every managed WordPress docroot (idempotent).
+fix_wordpress_sites() {
+  local name type host root
+  while IFS='|' read -r name type host root; do
+    [ -n "$root" ] || continue
+    root="$(normalize_root "$root")"
+    case "$root" in
+      "$HOME"/*) ;;
+      *) continue ;;
+    esac
+    [ -f "$root/wp-load.php" ] || [ "$type" = "wordpress" ] || continue
+    [ -d "$root" ] || continue
+    ensure_wordpress_direct_fs "$root"
+    apply_wordpress_http_acls "$root"
+  done < <(list_vhosts)
 }
 
 install_wordpress() {
@@ -132,6 +199,8 @@ install_wordpress() {
   mkdir -p "$dest" || return 1
   if [ -f "$dest/wp-load.php" ]; then
     echo "INFO: WordPress already present in $dest"
+    ensure_wordpress_direct_fs "$dest"
+    apply_wordpress_http_acls "$dest"
     return 0
   fi
 
@@ -174,23 +243,54 @@ install_wordpress() {
     return 1
   fi
   rm -rf "$tmp"
+  ensure_wordpress_direct_fs "$dest"
+  apply_wordpress_http_acls "$dest"
   echo "OK: WordPress $OMARCHWEB_WP_VERSION extracted to $dest"
-  if id http >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1; then
-    setfacl -R -m u:http:rwX "$dest" 2>/dev/null || true
-    setfacl -R -d -m u:http:rwX "$dest" 2>/dev/null || true
+}
+
+# Prepare an empty Laravel project directory. Do not scaffold — the user runs
+# `laravel new .` (with any starter kit) or composer create-project themselves.
+prepare_laravel_project() {
+  local dest="$1"
+  local entries
+
+  [ -n "$dest" ] || return 1
+  mkdir -p "$dest" || return 1
+
+  if [ -f "$dest/artisan" ]; then
+    echo "INFO: Laravel already present in $dest"
+    return 0
   fi
+
+  # Drop the old OmarchWeb phpinfo stub so laravel new . can run.
+  if [ -d "$dest/public" ] && [ -f "$dest/public/index.php" ] \
+      && [ ! -f "$dest/artisan" ] \
+      && grep -Fq 'phpinfo' "$dest/public/index.php" 2>/dev/null; then
+    rm -rf -- "$dest/public"
+  fi
+
+  entries="$(find "$dest" -mindepth 1 -maxdepth 1 \
+    ! -name '.DS_Store' ! -name '._*' 2>/dev/null | head -1)"
+  if [ -n "$entries" ]; then
+    echo "ERROR: $dest is not empty — remove it or choose another name." >&2
+    echo "ERROR: leave the folder empty so you can run: laravel new ." >&2
+    return 1
+  fi
+
+  echo "OK: empty Laravel project folder at $dest"
+  echo "Next: cd $(printf %q "$dest") && laravel new ."
+  echo "      (pick a starter kit, or use: composer create-project laravel/laravel .)"
 }
 
 add_vhost() {
-  # add <name> <type> [host] [root] [proxy_port]
+  # add <name> <type> [host] [root]
   local name="$1" type="$2"
   local host="${3:-}"
   local root="${4:-}"
-  local proxy_port="${5:-}"
 
   name_ok "$name" || { echo "ERROR: invalid vhost name '$name'" >&2; return 1; }
-  [ "$type" = "php" ] || [ "$type" = "node" ] || [ "$type" = "laravel" ] || [ "$type" = "wordpress" ] || {
-    echo "ERROR: unknown type '$type' (php|laravel|wordpress|node)" >&2; return 1; }
+  [ "$type" = "php" ] || [ "$type" = "laravel" ] || [ "$type" = "wordpress" ] || {
+    echo "ERROR: unknown type '$type' (php|laravel|wordpress)" >&2; return 1; }
   [ -z "$host" ] && host="${name}.test"
   host_ok "$host" || { echo "ERROR: invalid host '$host'" >&2; return 1; }
 
@@ -203,6 +303,7 @@ add_vhost() {
 
   local kind="$type"
   local nginx_type="$type"
+  local project=""
 
   if [ "$kind" = "laravel" ]; then
     nginx_type="php"
@@ -216,9 +317,23 @@ add_vhost() {
   root="$(normalize_root "$root")"
   WEB_ROOT="$(normalize_root "$WEB_ROOT")"
 
+  case "$kind" in
+    wordpress|laravel|php)
+      prepare_php_vhost || return 1
+      ;;
+  esac
+
   if [ "$kind" = "wordpress" ]; then
     omarchweb_elevate php-ext mysqli || return 1
     install_wordpress "$root" || return 1
+  elif [ "$kind" = "laravel" ]; then
+    case "$root" in
+      */public) project="${root%/public}" ;;
+      *) project="$root" ;;
+    esac
+    [ -n "$project" ] || project="$WEB_ROOT/$name"
+    prepare_laravel_project "$project" || return 1
+    root="$project/public"
   elif [ "$nginx_type" = "php" ]; then
     mkdir -p "$root"
     if [ ! -f "$root/index.php" ]; then
@@ -227,7 +342,7 @@ add_vhost() {
   fi
 
   # Conf goes over stdin so root never reads a predictable /tmp path.
-  if ! render_block "$name" "$nginx_type" "$host" "$root" "$proxy_port" "$kind" \
+  if ! render_block "$name" "$nginx_type" "$host" "$root" "$kind" \
       | omarchweb_elevate vhost-install "$name" "$host"; then
     return 1
   fi
@@ -242,6 +357,88 @@ remove_vhost() {
   echo "OK: removed vhost '$name'"
 }
 
+vhost_url_for() {
+  local host="$1"
+  local url="http://${host}"
+  if [ "$PORT" != "80" ]; then
+    url="${url}:${PORT}"
+  fi
+  printf '%s\n' "$url"
+}
+
+# Resolve a managed vhost from an explicit name or the current working directory.
+# Prints: name|type|host|root|url
+resolve_vhost() {
+  local want="${1:-}"
+  local cwd name type host root project best_name="" best_type="" best_host="" best_root="" best_len=0
+  cwd="$(pwd -P 2>/dev/null || pwd)"
+
+  while IFS='|' read -r name type host root; do
+    [ -n "$name" ] || continue
+    root="$(normalize_root "$root")"
+    if [ -n "$want" ]; then
+      if [ "$name" = "$want" ] || [ "$host" = "$want" ]; then
+        printf '%s|%s|%s|%s|%s\n' "$name" "$type" "$host" "$root" "$(vhost_url_for "$host")"
+        return 0
+      fi
+      continue
+    fi
+
+    project="$root"
+    case "$type" in
+      laravel)
+        case "$root" in
+          */public) project="${root%/public}" ;;
+        esac
+        ;;
+    esac
+
+    case "$cwd" in
+      "$root"|"$root"/*|"$project"|"$project"/*)
+        if [ "${#project}" -gt "$best_len" ]; then
+          best_len="${#project}"
+          best_name="$name"
+          best_type="$type"
+          best_host="$host"
+          best_root="$root"
+        fi
+        ;;
+    esac
+  done < <(list_vhosts)
+
+  if [ -n "$want" ]; then
+    echo "ERROR: no OmarchWeb vhost named '$want'" >&2
+    return 1
+  fi
+  if [ -z "$best_name" ]; then
+    echo "ERROR: cwd is not inside an OmarchWeb vhost project ($cwd)" >&2
+    echo "ERROR: cd into ~/Web/<site> (or pass a vhost name)" >&2
+    return 1
+  fi
+  printf '%s|%s|%s|%s|%s\n' "$best_name" "$best_type" "$best_host" "$best_root" "$(vhost_url_for "$best_host")"
+}
+
+print_vhost_url() {
+  local row url
+  row="$(resolve_vhost "${1:-}")" || return 1
+  url="$(printf '%s\n' "$row" | cut -d'|' -f5)"
+  printf '%s\n' "$url"
+}
+
+open_vhost_url() {
+  local row url
+  row="$(resolve_vhost "${1:-}")" || return 1
+  url="$(printf '%s\n' "$row" | cut -d'|' -f5)"
+  if ! command -v xdg-open >/dev/null 2>&1; then
+    echo "ERROR: xdg-open not found" >&2
+    echo "$url"
+    return 1
+  fi
+  echo "Opening $url"
+  xdg-open "$url" >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+}
+
 case "${1:-}" in
   list) list_vhosts ;;
   add)
@@ -249,15 +446,29 @@ case "${1:-}" in
     add_vhost "$@"
     ;;
   tune)
+    prepare_php_vhost || exit 1
+    fix_wordpress_sites
     omarchweb_elevate nginx-tune
+    ;;
+  fix-wordpress)
+    prepare_php_vhost || exit 1
+    fix_wordpress_sites
+    omarchweb_elevate nginx-tune
+    echo "OK: WordPress FS_METHOD, http write ACLs, and ownership repaired"
     ;;
   remove)
     [ "$#" -lt 2 ] && { echo "usage: vhost.sh remove <name>" >&2; exit 1; }
     remove_vhost "$2"
     ;;
+  url)
+    print_vhost_url "${2:-}"
+    ;;
+  open)
+    open_vhost_url "${2:-}"
+    ;;
   *)
     echo "unknown action: ${1:-}" >&2
-    echo "usage: vhost.sh list | add <name> <php|laravel|wordpress|node> [host] [root] [proxy_port] | remove <name> | tune" >&2
+    echo "usage: vhost.sh list | add <name> <php|laravel|wordpress> [host] [root] | remove <name> | tune | fix-wordpress | open [name] | url [name]" >&2
     exit 1
     ;;
 esac

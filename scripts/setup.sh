@@ -90,7 +90,7 @@ init_postgres() {
 install_service() {
   local svc="$1"
   case "$svc" in
-    php-fpm)    install_pkg php php-fpm; omarchweb_elevate php-ext mysqli ;;
+    php-fpm)    install_pkg php php-fpm; omarchweb_elevate php-ext mysqli; omarchweb_elevate php-fpm-pool-ensure ;;
     mariadb)    install_pkg mariadb; init_mariadb ;;
     nginx)      install_pkg nginx ;;
     postgresql) install_pkg postgresql; init_postgres ;;
@@ -150,6 +150,7 @@ case "${1:-}" in
       install_service php-fpm || exit $?
       install_service mariadb || exit $?
       install_service nginx || exit $?
+      omarchweb_elevate php-fpm-pool-ensure || exit $?
       install_pkg composer php-pgsql php-sqlite || exit $?
       omarchweb_elevate php-ext mysqli || exit $?
 
@@ -161,6 +162,10 @@ case "${1:-}" in
         composer global require --no-interaction --prefer-dist \
           "laravel/installer:${OMARCHWEB_LARAVEL_INSTALLER_VERSION}" 2>/dev/null || true
       fi
+
+      # User CLI: omarchweb / web (open current vhost in browser, etc.).
+      "$(dirname "$0")/cli.sh" install-cli || true
+
       echo "OK: setup complete. See OmarchWeb panel to start services."
     fi
     ;;

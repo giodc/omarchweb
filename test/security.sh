@@ -129,6 +129,32 @@ else
     "vhost.sh must extract WordPress from a digest-pinned fd, not the download pathname."
 fi
 
+if grep -Fq "define('FS_METHOD', 'direct')" scripts/vhost.sh \
+  && grep -q 'ensure_wordpress_direct_fs' scripts/vhost.sh \
+  && grep -q 'apply_wordpress_http_acls' scripts/vhost.sh; then
+  ok "WordPress install forces FS_METHOD=direct and http write ACLs"
+else
+  bad "wordpress-fs-method" \
+    "vhost.sh must set a fixed FS_METHOD=direct define and refresh http write ACLs."
+fi
+
+if grep -q 'm::rwx' scripts/root.sh scripts/vhost.sh \
+  && grep -q 'grant_http_access "\$docroot" "write"' scripts/root.sh; then
+  ok "WordPress ACL path refreshes mask::rwx on managed docroots"
+else
+  bad "wordpress-acl-mask" \
+    "root.sh/vhost.sh must set m::rwx when granting http write on WordPress trees."
+fi
+
+if grep -q 'repair_wordpress_docroot_ownership' scripts/root.sh \
+  && grep -q '\-user http -o -group http' scripts/root.sh \
+  && grep -q 'repair_wordpress_docroot_ownership "\$docroot" "\$user"' scripts/root.sh; then
+  ok "WordPress tune reclaims http-owned files under managed docroots"
+else
+  bad "wordpress-ownership-repair" \
+    "root.sh must chown http-owned paths under managed WordPress docroots on tune."
+fi
+
 if grep -n 'laravel/installer"' scripts/setup.sh | grep -v "${OMARCHWEB_LARAVEL_INSTALLER_VERSION}"; then
   bad "composer-unpinned" "composer require must pin laravel/installer:${OMARCHWEB_LARAVEL_INSTALLER_VERSION}"
 elif grep -q "laravel/installer:\${OMARCHWEB_LARAVEL_INSTALLER_VERSION}" scripts/setup.sh; then
@@ -251,11 +277,87 @@ else
   bad "init-postgres-arg" "init-postgres should take no arguments; got: $out"
 fi
 
+if grep -q 'PG_VERSION' scripts/root.sh \
+  && grep -q 'Initializing PostgreSQL' scripts/root.sh \
+  && ! grep -nE 'initdb .* \|\| true' scripts/root.sh; then
+  ok "postgres init checks PG_VERSION and does not swallow initdb failures"
+else
+  bad "postgres-init" \
+    "init_postgres must key off PG_VERSION/base and must not '|| true' initdb."
+fi
+
+if grep -q 'init-postgres' scripts/services.sh; then
+  ok "starting postgresql ensures the cluster is initialized first"
+else
+  bad "postgres-start-init" "services.sh start/restart postgresql must call init-postgres."
+fi
+
 out="$(scripts/root.sh init-mariadb /var/lib/mysql 2>&1 || true)"
 if printf '%s' "$out" | grep -q 'usage: root.sh init-mariadb'; then
   ok "root.sh init-mariadb refuses extra arguments"
 else
   bad "init-mariadb-arg" "init-mariadb should take no arguments; got: $out"
+fi
+
+out="$(scripts/root.sh php-fpm-pool-ensure extra 2>&1 || true)"
+if printf '%s' "$out" | grep -q 'usage: root.sh php-fpm-pool-ensure'; then
+  ok "root.sh php-fpm-pool-ensure refuses extra arguments"
+else
+  bad "php-fpm-pool-arg" "php-fpm-pool-ensure should take no arguments; got: $out"
+fi
+
+if grep -q 'php-fpm-pool-ensure' scripts/root.sh scripts/vhost.sh scripts/setup.sh \
+  && grep -q '/etc/php/php-fpm.d/omarchweb-' scripts/root.sh \
+  && grep -q 'pool_user_ok' scripts/root.sh \
+  && ! grep -nE 'omarchweb_elevate php-fpm-pool-ensure[[:space:]]+"\$' scripts/*.sh; then
+  ok "php-fpm pool is a fixed-path helper action with a validated caller username"
+else
+  bad "php-fpm-pool-review" \
+    "pool ensure must hardcode /etc/php/php-fpm.d/omarchweb-<user>.conf and take no caller path."
+fi
+
+if grep -q 'fpm_sock_for_user' scripts/vhost.sh \
+  && grep -q 'omarchweb-%s.sock' scripts/vhost.sh \
+  && grep -q 'prepare_php_vhost' scripts/vhost.sh; then
+  ok "vhost PHP sites default to the per-user OmarchWeb pool socket"
+else
+  bad "vhost-fpm-socket" "vhost.sh must use a per-user omarchweb pool socket for PHP sites."
+fi
+
+if grep -q 'repair_vhost_fpm_sockets' scripts/root.sh \
+  && grep -q 'fastcgi_pass unix:/run/php-fpm/' scripts/root.sh; then
+  ok "nginx-tune rewires managed vhost fastcgi_pass to the caller pool"
+else
+  bad "vhost-fpm-rewire" "root.sh nginx-tune must repair fastcgi_pass for managed vhosts."
+fi
+
+if grep -qE 'php\|laravel\|wordpress' scripts/vhost.sh \
+  && ! grep -q 'proxy_pass' scripts/vhost.sh \
+  && ! grep -qE '"node"|"static"' Panel.qml \
+  && ! grep -qE 'php\|static\|laravel|php\|laravel\|wordpress\|node' scripts/vhost.sh \
+  && ! grep -q 'repair_node_vhost_locations' scripts/root.sh; then
+  ok "creatable vhost types are php|laravel|wordpress only"
+else
+  bad "vhost-types" \
+    "creatable types must be php|laravel|wordpress (no node/static/proxy_pass)."
+fi
+
+if grep -q 'prepare_laravel_project' scripts/vhost.sh \
+  && ! grep -nE '\$\(laravel_bin\)|"\$bin" new |[^:]laravel new \. --' scripts/vhost.sh; then
+  ok "Laravel vhosts leave an empty project folder for the user to scaffold"
+else
+  bad "laravel-scaffold" \
+    "vhost.sh must prepare an empty Laravel project dir and not run laravel new itself."
+fi
+
+if grep -q 'open_vhost_url' scripts/vhost.sh \
+  && grep -q 'resolve_vhost' scripts/vhost.sh \
+  && grep -q 'install_cli_wrappers' scripts/cli.sh \
+  && grep -q 'cli.sh" install-cli' scripts/setup.sh; then
+  ok "CLI can open/url the vhost for cwd and installs omarchweb/web wrappers"
+else
+  bad "cli-open" \
+    "vhost.sh open/url + cli.sh install-cli (from setup) are required."
 fi
 
 # The vhost document root is the one caller-supplied path root grants ACLs on.

@@ -58,6 +58,99 @@ db_user_ok() {
   esac
 }
 
+caller_username() {
+  local uid="${PKEXEC_UID:-${SUDO_UID:-}}"
+  if [ -n "$uid" ]; then
+    getent passwd "$uid" | cut -d: -f1
+    return
+  fi
+  local user="${SUDO_USER:-}"
+  if [ -n "$user" ] && [ "$user" != "root" ]; then
+    printf '%s\n' "$user"
+    return
+  fi
+  printf '%s\n' ""
+}
+
+# Pool usernames become a filename suffix and ini values; restrict like db roles.
+pool_user_ok() {
+  case "$1" in
+    *[!A-Za-z0-9_-]*|'') return 1 ;;
+    root|http|nginx|nobody|mysql|mariadb|postgres|daemon|bin|sys|ftp) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+render_php_fpm_pool() {
+  local user="$1"
+  cat <<EOF
+; managed by OmarchWeb
+[omarchweb-${user}]
+user = ${user}
+group = ${user}
+listen = /run/php-fpm/omarchweb-${user}.sock
+listen.owner = http
+listen.group = http
+listen.mode = 0660
+pm = dynamic
+pm.max_children = 5
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 3
+clear_env = no
+EOF
+}
+
+# Install a fixed per-user pool under /etc/php/php-fpm.d/omarchweb-<user>.conf.
+# The username is derived from the authenticated caller only.
+ensure_php_fpm_pool() {
+  local user conf home
+  user="$(caller_username)"
+  pool_user_ok "$user" || { echo "ERROR: invalid pool user '$user'" >&2; return 1; }
+  home="$(getent passwd "$user" | cut -d: -f6)"
+  [ -n "$home" ] && [ -d "$home" ] || {
+    echo "ERROR: cannot resolve home for pool user '$user'" >&2
+    return 1
+  }
+  conf="/etc/php/php-fpm.d/omarchweb-${user}.conf"
+  if [ -f "$conf" ] && grep -q '^; managed by OmarchWeb' "$conf" 2>/dev/null \
+      && grep -Fq "listen = /run/php-fpm/omarchweb-${user}.sock" "$conf" \
+      && grep -Fq "user = ${user}" "$conf"; then
+    :
+  else
+    render_php_fpm_pool "$user" | atomic_replace "$conf" || return 1
+    echo "OK: installed php-fpm pool for $user"
+  fi
+  if systemctl is-active --quiet php-fpm 2>/dev/null; then
+    systemctl reload php-fpm || systemctl restart php-fpm
+  fi
+}
+
+# Point managed PHP vhosts under the caller's home at their OmarchWeb pool socket.
+repair_vhost_fpm_sockets() {
+  local home="$1" user sock f docroot esc
+  user="$(caller_username)"
+  pool_user_ok "$user" || return 0
+  [ -n "$home" ] || return 0
+  sock="unix:/run/php-fpm/omarchweb-${user}.sock"
+  esc="$(printf '%s' "$sock" | sed 's/[&/\]/\\&/g')"
+  for f in "$AVAIL"/*; do
+    [ -f "$f" ] || continue
+    grep -q 'managed by OmarchWeb' "$f" 2>/dev/null || continue
+    grep -q 'fastcgi_pass' "$f" 2>/dev/null || continue
+    docroot="$(sed -n 's/.*root[[:space:]]*\([^;]*\);.*/\1/p' "$f" | tr -d ' ' | head -1)"
+    [ -n "$docroot" ] || continue
+    case "$docroot" in
+      "$home"/*) ;;
+      *) continue ;;
+    esac
+    grep -Fq "fastcgi_pass $sock;" "$f" 2>/dev/null && continue
+    atomic_replace "$f" sed \
+      -e "s|fastcgi_pass unix:/run/php-fpm/[^;]*;|fastcgi_pass ${esc};|g" \
+      "$f" || return 1
+  done
+}
+
 caller_home() {
   local uid="${PKEXEC_UID:-${SUDO_UID:-}}"
   if [ -n "$uid" ]; then
@@ -173,11 +266,30 @@ grant_http_access() {
       setfacl -m u:http:--x "$parent" 2>/dev/null || true
       parent="$(dirname "$parent")"
     done
-    setfacl -R -m "u:http:${mode}" "$docroot" 2>/dev/null || true
+    # Always refresh the mask with the named-user rights. A stale mask::r-x
+    # leaves http unable to write even when u:http:rwx is present.
     if [ "$write" = "write" ]; then
-      setfacl -R -d -m u:http:rwX "$docroot" 2>/dev/null || true
+      setfacl -R -m "u:http:${mode}" -m m::rwx "$docroot" 2>/dev/null || true
+      setfacl -R -d -m u:http:rwX -m m::rwx "$docroot" 2>/dev/null || true
+    else
+      setfacl -R -m "u:http:${mode}" "$docroot" 2>/dev/null || true
     fi
   fi
+}
+
+# Reclaim files created when php-fpm ran as http (legacy pool) so the caller
+# owns their WordPress tree again under the per-user OmarchWeb pool.
+repair_wordpress_docroot_ownership() {
+  local docroot="$1" user="$2"
+  local count
+  [ -n "$docroot" ] && [ -d "$docroot" ] || return 0
+  pool_user_ok "$user" || return 0
+  id http >/dev/null 2>&1 || return 0
+  count="$(find "$docroot" -xdev \( -user http -o -group http \) 2>/dev/null | wc -l)"
+  [ "${count:-0}" -eq 0 ] && return 0
+  find "$docroot" -xdev \( -user http -o -group http \) \
+    -exec chown "$user:$user" {} + 2>/dev/null || return 1
+  echo "OK: reclaimed $count http-owned paths under $docroot"
 }
 
 # Collapse $HOME/~/Web and ~/Web into $HOME/Web in managed vhost files,
@@ -185,7 +297,8 @@ grant_http_access() {
 repair_vhost_paths() {
   local home="$1"
   [ -n "$home" ] || return 0
-  local f
+  local f docroot src dest user
+  user="$(caller_username)"
   for f in "$AVAIL"/*; do
     [ -f "$f" ] || continue
     grep -q 'managed by OmarchWeb' "$f" 2>/dev/null || continue
@@ -196,7 +309,6 @@ repair_vhost_paths() {
   done
   if [ -d "$home/~/Web" ]; then
     mkdir -p "$home/Web"
-    local src dest
     for src in "$home/~/Web"/*; do
       [ -e "$src" ] || continue
       dest="$home/Web/$(basename "$src")"
@@ -208,12 +320,34 @@ repair_vhost_paths() {
   if [ -d "$home/Web" ]; then
     grant_http_access "$home/Web"
   fi
+  # WordPress needs write ACLs (and a correct mask) on each managed docroot;
+  # the Web/ grant above is read/traverse only.
+  for f in "$AVAIL"/*; do
+    [ -f "$f" ] || continue
+    grep -q 'managed by OmarchWeb' "$f" 2>/dev/null || continue
+    docroot="$(sed -n 's/.*root[[:space:]]*\([^;]*\);.*/\1/p' "$f" | tr -d ' ' | head -1)"
+    [ -n "$docroot" ] && [ -d "$docroot" ] || continue
+    case "$docroot" in
+      "$home"/*) ;;
+      *) continue ;;
+    esac
+    if grep -q '^# type wordpress' "$f" 2>/dev/null || [ -f "$docroot/wp-load.php" ]; then
+      grant_http_access "$docroot" "write"
+      repair_wordpress_docroot_ownership "$docroot" "$user"
+    fi
+  done
 }
 
 reload_nginx() {
-  if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then
-    nginx -t
+  if ! command -v nginx >/dev/null 2>&1; then
+    return 0
+  fi
+  # Config may have been invalid while nginx was down; only touch the unit after -t.
+  nginx -t || return 1
+  if systemctl is-active --quiet nginx 2>/dev/null; then
     systemctl reload nginx
+  else
+    systemctl start nginx
   fi
 }
 
@@ -458,16 +592,54 @@ init_mariadb() {
 }
 
 init_postgres() {
-  if [ -f /usr/lib/systemd/system/postgresql.service ] && \
-     [ ! -d /var/lib/postgres/data ]; then
-    mkdir -p /var/lib/postgres/data
-    chown postgres:postgres /var/lib/postgres/data
-    chmod 0700 /var/lib/postgres/data
-    if command -v runuser >/dev/null 2>&1; then
-      runuser -u postgres -- initdb -D /var/lib/postgres/data -E UTF8 --locale=C.UTF-8 || true
-    else
-      su -s /usr/bin/bash postgres -c 'initdb -D /var/lib/postgres/data -E UTF8 --locale=C.UTF-8' || true
+  # Arch's postgresql.service refuses to start until PGDATA has PG_VERSION +
+  # base/ (see postgresql-check-db-dir). A previous failed init can leave an
+  # empty directory; treat "initialized" the same way the unit does, not as
+  # "directory exists".
+  local pgroot=/var/lib/postgres
+  local pgdata="$pgroot/data"
+  local locale=""
+
+  [ -f /usr/lib/systemd/system/postgresql.service ] || return 0
+  command -v initdb >/dev/null 2>&1 || {
+    echo "ERROR: initdb not found (install postgresql first)" >&2
+    return 1
+  }
+
+  if [ -f "$pgdata/PG_VERSION" ] && [ -d "$pgdata/base" ]; then
+    return 0
+  fi
+
+  mkdir -p "$pgroot"
+  chown postgres:postgres "$pgroot"
+
+  if [ -d "$pgdata" ]; then
+    if [ -n "$(find "$pgdata" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+      echo "ERROR: $pgdata exists but is not an initialized cluster (no PG_VERSION)." >&2
+      echo "ERROR: remove that directory only if it holds no data you need, then retry." >&2
+      return 1
     fi
+  else
+    mkdir -p "$pgdata"
+  fi
+  chown postgres:postgres "$pgdata"
+  chmod 0700 "$pgdata"
+
+  # Match Arch wiki; fall back when C.UTF-8 is not generated on the system.
+  if locale -a 2>/dev/null | grep -qiE '^C\.(utf-?8)$'; then
+    locale="C.UTF-8"
+  elif locale -a 2>/dev/null | grep -qiE '^en_US\.(utf-?8)$'; then
+    locale="en_US.UTF-8"
+  else
+    locale="C"
+  fi
+
+  echo "Initializing PostgreSQL at $pgdata (locale=$locale)..."
+  if command -v runuser >/dev/null 2>&1; then
+    runuser -u postgres -- initdb -D "$pgdata" -E UTF8 --locale="$locale"
+  else
+    su -s /usr/bin/bash -l postgres -c \
+      "initdb -D $(printf %q "$pgdata") -E UTF8 --locale=$(printf %q "$locale")"
   fi
 }
 
@@ -477,10 +649,17 @@ case "${1:-}" in
     # Derived from the authenticated caller, never from an argument: this path
     # is interpolated into sed expressions over /etc/nginx configs.
     home="$(caller_home)"
+    ensure_php_fpm_pool
     ensure_nginx_layout
     repair_vhost_paths "$home"
+    repair_vhost_fpm_sockets "$home"
     reload_nginx
     echo "OK: nginx hash sizes updated and vhost paths repaired"
+    ;;
+  php-fpm-pool-ensure)
+    [ "$#" -eq 1 ] || { echo "usage: root.sh php-fpm-pool-ensure" >&2; exit 1; }
+    ensure_php_fpm_pool
+    echo "OK: php-fpm pool ready for $(caller_username)"
     ;;
   vhost-install)
     [ "$#" -eq 3 ] || { echo "usage: root.sh vhost-install <name> <host>  (conf on stdin)" >&2; exit 1; }
@@ -535,7 +714,7 @@ case "${1:-}" in
     ;;
   *)
     echo "unknown action: ${1:-}" >&2
-    echo "usage: root.sh vhost-install|vhost-remove|nginx-tune|systemctl|pacman|pacman-r|install-mailpit|remove-mailpit|grant-mariadb|grant-postgres|init-mariadb|init-postgres|php-ext" >&2
+    echo "usage: root.sh vhost-install|vhost-remove|nginx-tune|php-fpm-pool-ensure|systemctl|pacman|pacman-r|install-mailpit|remove-mailpit|grant-mariadb|grant-postgres|init-mariadb|init-postgres|php-ext" >&2
     exit 1
     ;;
 esac

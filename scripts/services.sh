@@ -130,6 +130,12 @@ do_action() {
     return 2
   fi
 
+  # Fresh Arch installs leave PGDATA uninitialized; ensure the cluster exists
+  # before systemctl start (same path as setup.sh install).
+  if [ "$svc" = "postgresql" ] && { [ "$action" = "start" ] || [ "$action" = "restart" ]; }; then
+    omarchweb_elevate init-postgres || return 1
+  fi
+
   if [ "$kind" = "user" ]; then
     systemctl --user "$action" "$svc"
     return $?

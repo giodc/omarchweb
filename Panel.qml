@@ -23,6 +23,8 @@ Panel {
   readonly property int refreshMs: Math.max(5000, parseInt(setting("refreshSeconds", 30), 10) || 30) * 1000
   readonly property string webRoot: setting("webRoot", "~/Web")
   readonly property int nginxPort: parseInt(setting("nginxPort", 80), 10) || 80
+  // Keep in sync with manifest.json "version".
+  readonly property string pluginVersion: "0.2.1"
 
   // ---- Tabs ----
   property string tab: "services"
@@ -304,7 +306,6 @@ Panel {
   property string newVhostType: "php"
   property string newVhostHost: ""
   property string newVhostRoot: ""
-  property int newVhostPort: nginxPort
 
   function expandHome(p) {
     var s = String(p || "").trim()
@@ -335,7 +336,6 @@ Panel {
     // Keep optional arguments in their shell positions.
     args.push(String(newVhostHost).trim())
     args.push(projectRoot)
-    args.push(newVhostType === "node" ? String(newVhostPort) : "")
     vhostActionProc.command = args
     vhostActionProc.running = true
   }
@@ -346,11 +346,18 @@ Panel {
     vhostActionProc.running = true
   }
 
+  function tuneVhosts() {
+    busy = true
+    vhostActionProc.command = [ scriptPath("vhost.sh"), "tune" ]
+    vhostActionProc.running = true
+  }
+
   function openUrl(url) {
     var u = String(url || "").trim()
     if (!u) return
-    browserProc.command = [ "xdg-open", u ]
-    browserProc.running = true
+    // Detached: a shared Process waits for xdg-open/browser exit, so a second
+    // Open only fires after the first browser window is closed.
+    Quickshell.execDetached(["xdg-open", u])
   }
 
   function openVhost(vhost) {
@@ -358,8 +365,30 @@ Panel {
     if (!host) return
     var url = "http://" + host
     if (root.nginxPort !== 80) url += ":" + root.nginxPort
-    browserProc.command = [ "xdg-open", url ]
-    browserProc.running = true
+    openUrl(url)
+  }
+
+  // Project folder for file manager / terminal (Laravel docroot is …/public).
+  function vhostProjectDir(vhost) {
+    var r = String((vhost && vhost.root) || "").trim()
+    if (!r) return ""
+    if (String(vhost.type || "") === "laravel") {
+      if (r.length >= 7 && r.substring(r.length - 7) === "/public")
+        return r.substring(0, r.length - 7)
+    }
+    return r
+  }
+
+  function openVhostFolder(vhost) {
+    var dir = vhostProjectDir(vhost)
+    if (!dir) return
+    Quickshell.execDetached(["xdg-open", dir])
+  }
+
+  function openVhostTerminal(vhost) {
+    var dir = vhostProjectDir(vhost)
+    if (!dir) return
+    Quickshell.execDetached(["xdg-terminal-exec", "--dir=" + dir])
   }
 
   // ---- Setup ----
@@ -423,10 +452,6 @@ Panel {
         root.vhostsLoaded = true
       }
     }
-  }
-
-  Process {
-    id: browserProc
   }
 
   Process {
@@ -631,6 +656,14 @@ Panel {
                 font.pixelSize: Style.font.caption
                 font.bold: true
                 font.letterSpacing: 1
+                anchors.verticalCenter: parent.verticalCenter
+              }
+              Text {
+                text: "v" + root.pluginVersion
+                color: root.dim
+                font.family: root.fontName
+                font.pixelSize: Style.font.caption
+                opacity: 0.65
                 anchors.verticalCenter: parent.verticalCenter
               }
             }
@@ -1622,7 +1655,7 @@ Panel {
                   width: (parent.width - parent.spacing) * 0.5
                   spacing: Style.space(4)
                   Repeater {
-                    model: [ "php", "wordpress", "laravel", "node" ]
+                    model: [ "php", "laravel", "wordpress" ]
                     Rectangle {
                       id: typePill
                       required property string modelData
@@ -1683,19 +1716,7 @@ Panel {
                 width: parent.width
                 spacing: Style.space(8)
 
-                TextField {
-                  visible: root.newVhostType === "node"
-                  id: portField
-                  width: parent.width
-                  placeholderText: "node port"
-                  foreground: root.fg
-                  font.family: root.fontName
-                  text: String(root.newVhostPort)
-                  onTextChanged: root.newVhostPort = parseInt(text, 10) || root.nginxPort
-                }
-
                 Text {
-                  visible: root.newVhostType !== "node"
                   width: parent.width
                   text: "listen port " + root.nginxPort
                   color: root.dim
@@ -1705,36 +1726,67 @@ Panel {
                 }
               }
 
-              Rectangle {
-                width: Math.max(Style.space(120), addBtnText.implicitWidth + Style.space(28))
-                height: Style.space(32)
-                radius: Style.cornerRadius
-                color: addArea.containsMouse
-                  ? Qt.lighter(Color.accent, 1.18)
-                  : Color.accent
-                border.width: 1
-                border.color: Qt.lighter(Color.accent, 1.25)
-                Text {
-                  id: addBtnText
-                  anchors.centerIn: parent
-                  text: "Add vhost"
-                  color: Color.background
-                  font.family: root.fontName
-                  font.pixelSize: Style.font.bodySmall
-                  font.bold: true
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
+
+                Rectangle {
+                  width: Math.max(Style.space(120), addBtnText.implicitWidth + Style.space(28))
+                  height: Style.space(32)
+                  radius: Style.cornerRadius
+                  color: addArea.containsMouse
+                    ? Qt.lighter(Color.accent, 1.18)
+                    : Color.accent
+                  border.width: 1
+                  border.color: Qt.lighter(Color.accent, 1.25)
+                  Text {
+                    id: addBtnText
+                    anchors.centerIn: parent
+                    text: "Add vhost"
+                    color: Color.background
+                    font.family: root.fontName
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
+                  }
+                  MouseArea {
+                    id: addArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.addVhost()
+                  }
                 }
-                MouseArea {
-                  id: addArea
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.addVhost()
+
+                Rectangle {
+                  width: Math.max(Style.space(120), tuneBtnText.implicitWidth + Style.space(28))
+                  height: Style.space(32)
+                  radius: Style.cornerRadius
+                  color: tuneArea.containsMouse
+                    ? Style.hoverFillFor(root.fg, Color.accent)
+                    : "transparent"
+                  border.width: 1
+                  border.color: Qt.rgba(root.dim.r, root.dim.g, root.dim.b, 0.7)
+                  Text {
+                    id: tuneBtnText
+                    anchors.centerIn: parent
+                    text: "Tune sites"
+                    color: root.fg
+                    font.family: root.fontName
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                  MouseArea {
+                    id: tuneArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.tuneVhosts()
+                  }
                 }
               }
 
               Text {
                 width: parent.width
-                text: "nginx changes may ask for your password"
+                text: "Tune sites: per-user PHP pool, ownership repair, nginx fixes. May ask for your password."
                 color: root.dim
                 font.family: root.fontName
                 font.pixelSize: Style.font.caption
@@ -1799,61 +1851,103 @@ Panel {
                   }
                 }
 
-                Rectangle {
-                  id: vhOpen
-                  anchors.right: vhRemove.left
-                  anchors.rightMargin: Style.space(6)
-                  anchors.verticalCenter: parent.verticalCenter
-                  width: vhOpenText.implicitWidth + Style.space(16)
-                  height: Style.space(22)
-                  radius: Style.cornerRadius
-                  color: vhOpenArea.containsMouse ? Style.hoverFillFor(root.fg, Color.accent) : "transparent"
-                  Text {
-                    id: vhOpenText
-                    anchors.centerIn: parent
-                    text: "Open"
-                    color: Color.accent
-                    font.family: root.fontName
-                    font.pixelSize: Style.font.caption
-                  }
-                  MouseArea {
-                    id: vhOpenArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.openVhost(vhRow.modelData)
-                  }
-                }
-
-                Rectangle {
-                  id: vhRemove
+                Row {
+                  id: vhActions
                   anchors.right: parent.right
                   anchors.rightMargin: Style.space(8)
                   anchors.verticalCenter: parent.verticalCenter
-                  width: vhDelText.implicitWidth + Style.space(16)
-                  height: Style.space(22)
-                  radius: Style.cornerRadius
-                  color: vhDelArea.containsMouse ? Style.hoverFillFor(root.fg, Color.urgent) : "transparent"
-                  Text {
-                    id: vhDelText
-                    anchors.centerIn: parent
-                    text: "Remove"
-                    color: Color.urgent
-                    font.family: root.fontName
-                    font.pixelSize: Style.font.caption
+                  spacing: Style.space(4)
+
+                  Rectangle {
+                    width: Style.space(26)
+                    height: Style.space(26)
+                    radius: Style.cornerRadius
+                    color: vhViewArea.containsMouse ? Style.hoverFillFor(root.fg, Color.accent) : "transparent"
+                    Text {
+                      anchors.centerIn: parent
+                      text: "󰖟"
+                      color: vhViewArea.containsMouse ? Color.accent : root.dim
+                      font.family: root.fontName
+                      font.pixelSize: Style.font.body
+                    }
+                    MouseArea {
+                      id: vhViewArea
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.openVhost(vhRow.modelData)
+                    }
                   }
-                  MouseArea {
-                    id: vhDelArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.removeVhost(vhRow.modelData.name)
+
+                  Rectangle {
+                    width: Style.space(26)
+                    height: Style.space(26)
+                    radius: Style.cornerRadius
+                    color: vhFolderArea.containsMouse ? Style.hoverFillFor(root.fg, Color.accent) : "transparent"
+                    Text {
+                      anchors.centerIn: parent
+                      text: "󰉋"
+                      color: vhFolderArea.containsMouse ? Color.accent : root.dim
+                      font.family: root.fontName
+                      font.pixelSize: Style.font.body
+                    }
+                    MouseArea {
+                      id: vhFolderArea
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.openVhostFolder(vhRow.modelData)
+                    }
+                  }
+
+                  Rectangle {
+                    width: Style.space(26)
+                    height: Style.space(26)
+                    radius: Style.cornerRadius
+                    color: vhTermArea.containsMouse ? Style.hoverFillFor(root.fg, Color.accent) : "transparent"
+                    Text {
+                      anchors.centerIn: parent
+                      text: ""
+                      color: vhTermArea.containsMouse ? Color.accent : root.dim
+                      font.family: root.fontName
+                      font.pixelSize: Style.font.body
+                    }
+                    MouseArea {
+                      id: vhTermArea
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.openVhostTerminal(vhRow.modelData)
+                    }
+                  }
+
+                  Rectangle {
+                    width: vhDelText.implicitWidth + Style.space(16)
+                    height: Style.space(22)
+                    radius: Style.cornerRadius
+                    color: vhDelArea.containsMouse ? Style.hoverFillFor(root.fg, Color.urgent) : "transparent"
+                    anchors.verticalCenter: parent.verticalCenter
+                    Text {
+                      id: vhDelText
+                      anchors.centerIn: parent
+                      text: "Remove"
+                      color: Color.urgent
+                      font.family: root.fontName
+                      font.pixelSize: Style.font.caption
+                    }
+                    MouseArea {
+                      id: vhDelArea
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.removeVhost(vhRow.modelData.name)
+                    }
                   }
                 }
 
                 MouseArea {
                   id: vhRowArea
-                  width: parent.width - Style.space(128)
+                  width: Math.max(0, parent.width - vhActions.width - Style.space(24))
                   height: parent.height
                   acceptedButtons: Qt.LeftButton
                   hoverEnabled: true
