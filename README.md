@@ -62,29 +62,51 @@ Tune is idempotent — safe to run anytime after a plugin update.
 
 ### Laravel sites
 
-OmarchWeb does **not** run `laravel new` for you (so you can pick a starter
-kit). Adding a Laravel vhost creates an **empty** project folder and an nginx
-vhost pointed at `public/`.
+OmarchWeb does **not** scaffold Laravel for you. Adding a Laravel vhost creates
+an **empty** project folder and an nginx vhost pointed at `public/`.
 
 1. In the panel, add a vhost with type **laravel** (name e.g. `blog`).
 2. Open the project folder or terminal from the vhost row (or:
    `cd ~/Web/blog`).
-3. Scaffold the app yourself:
+3. Scaffold into that empty folder yourself:
 
 ```sh
 cd ~/Web/blog
-laravel new .
-# pick Vue / React / Livewire / none, database, etc. interactively
 
-# or without the installer:
+# Blank Laravel app (no starter kit)
 composer create-project laravel/laravel .
+
+# Or an official starter kit (pick one)
+composer create-project laravel/react-starter-kit .
+# composer create-project laravel/vue-starter-kit .
+# composer create-project laravel/livewire-starter-kit .
+# composer create-project laravel/svelte-starter-kit .
 ```
+
+After a starter kit (or any app with a frontend build):
+
+```sh
+npm install && npm run build
+```
+
+Or from the parent directory with the Laravel installer (recreates the empty
+folder; add `--react`, `--vue`, `--livewire`, or `--svelte` for a kit):
+
+```sh
+cd ~/Web
+laravel new blog --force
+# laravel new blog --force --react
+```
+
+Do **not** use `laravel new .` inside the project folder. Current Laravel
+Installer versions always report “Application already exists” for `.`, even
+when the directory is empty — they compare the string `.` to `getcwd()`,
+which never matches, and `--force` is disallowed with `.`.
 
 4. When `public/` exists, open the site (panel browser icon, or `web open`).
 
-Requirements: Composer and the Laravel installer (full OmarchWeb **setup**
-installs them). The project folder must stay empty until you run
-`laravel new .`.
+Requirements: Composer (and optionally the Laravel installer / Node for kits).
+Full OmarchWeb **setup** installs Composer and the installer.
 
 Until you scaffold, the URL may 404 — that is expected.
 

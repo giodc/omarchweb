@@ -249,7 +249,7 @@ install_wordpress() {
 }
 
 # Prepare an empty Laravel project directory. Do not scaffold — the user runs
-# `laravel new .` (with any starter kit) or composer create-project themselves.
+# composer create-project (or laravel new <name> --force from the parent).
 prepare_laravel_project() {
   local dest="$1"
   local entries
@@ -262,7 +262,7 @@ prepare_laravel_project() {
     return 0
   fi
 
-  # Drop the old OmarchWeb phpinfo stub so laravel new . can run.
+  # Drop the old OmarchWeb phpinfo stub so scaffolding can run into an empty dir.
   if [ -d "$dest/public" ] && [ -f "$dest/public/index.php" ] \
       && [ ! -f "$dest/artisan" ] \
       && grep -Fq 'phpinfo' "$dest/public/index.php" 2>/dev/null; then
@@ -273,13 +273,16 @@ prepare_laravel_project() {
     ! -name '.DS_Store' ! -name '._*' 2>/dev/null | head -1)"
   if [ -n "$entries" ]; then
     echo "ERROR: $dest is not empty — remove it or choose another name." >&2
-    echo "ERROR: leave the folder empty so you can run: laravel new ." >&2
+    echo "ERROR: leave the folder empty so you can run: composer create-project laravel/laravel ." >&2
     return 1
   fi
 
   echo "OK: empty Laravel project folder at $dest"
-  echo "Next: cd $(printf %q "$dest") && laravel new ."
-  echo "      (pick a starter kit, or use: composer create-project laravel/laravel .)"
+  echo "Next: cd $(printf %q "$dest")"
+  echo "      composer create-project laravel/laravel ."
+  echo "      # or: laravel/react-starter-kit | vue-starter-kit | livewire-starter-kit | svelte-starter-kit"
+  echo "      (or from the parent: laravel new $(basename -- "$dest") --force [--react|--vue|--livewire|--svelte])"
+  echo "      Note: 'laravel new .' fails on current installer — it treats '.' as already existing."
 }
 
 add_vhost() {
