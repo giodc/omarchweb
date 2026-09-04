@@ -112,8 +112,8 @@ Until you scaffold, the URL may 404 — that is expected.
 
 ### CLI (`web` / `omarchweb`)
 
-After full setup (or `scripts/cli.sh install-cli`), wrappers are installed to
-`~/.local/bin`. Ensure that directory is on your `PATH`, then:
+After full setup (or **Install CLI** on the Services tab), wrappers are
+installed to `~/.local/bin`. Ensure that directory is on your `PATH`, then:
 
 ```sh
 cd ~/Web/myapp

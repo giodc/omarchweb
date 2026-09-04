@@ -40,8 +40,26 @@ EOF
   esac
 }
 
+# Prints: STATUS cli installed|missing|stale
+status_cli() {
+  local dest_dir="${OMARCHWEB_CLI_BIN_DIR:-$HOME/.local/bin}"
+  local cli="$omarchweb_scripts/cli.sh"
+  if [ -x "$dest_dir/web" ] && [ -x "$dest_dir/omarchweb" ] \
+      && grep -Fq "$cli" "$dest_dir/web" 2>/dev/null \
+      && grep -Fq "$cli" "$dest_dir/omarchweb" 2>/dev/null; then
+    echo "STATUS cli installed"
+    return 0
+  fi
+  if [ -e "$dest_dir/web" ] || [ -e "$dest_dir/omarchweb" ]; then
+    echo "STATUS cli stale"
+    return 1
+  fi
+  echo "STATUS cli missing"
+  return 1
+}
+
 usage() {
-  echo "usage: omarchweb open [name] | url [name] | list | install-cli | help" >&2
+  echo "usage: omarchweb open [name] | url [name] | list | install-cli | status | help" >&2
   echo "       web open [name]   # same (after install-cli / setup)" >&2
 }
 
@@ -59,6 +77,9 @@ case "${1:-}" in
     ;;
   install-cli|install)
     install_cli_wrappers
+    ;;
+  status)
+    status_cli
     ;;
   help|-h|--help|"")
     usage

@@ -133,6 +133,11 @@ Panel {
   property var vhosts: []
   property bool vhostsLoaded: false
 
+  // ---- CLI wrappers (~/.local/bin/web + omarchweb) ----
+  property string cliStatus: "" // installed | missing | stale
+  property bool cliLoaded: false
+  readonly property bool cliNeedsInstall: cliLoaded && cliStatus !== "installed"
+
   // ---- Transient messages ----
   property string notice: ""
   property string noticeColor: "transparent"
@@ -186,6 +191,7 @@ Panel {
     refreshServices()
     refreshDatabases()
     refreshVhosts()
+    refreshCliStatus()
   }
 
   // Prefer exec() so a click always restarts even when command is unchanged.
@@ -199,6 +205,10 @@ Panel {
 
   function refreshVhosts() {
     vhostProc.exec([ scriptPath("vhost.sh"), "list" ])
+  }
+
+  function refreshCliStatus() {
+    cliStatusProc.exec([ scriptPath("cli.sh"), "status" ])
   }
 
   function serviceRunning(key) {
@@ -414,6 +424,12 @@ Panel {
     setupProc.running = true
   }
 
+  function installCli() {
+    busy = true
+    cliInstallProc.command = [ scriptPath("cli.sh"), "install-cli" ]
+    cliInstallProc.running = true
+  }
+
   // ---- Process handlers ----
   Process {
     id: servicesProc
@@ -451,6 +467,47 @@ Panel {
         root.vhosts = Model.parseVhosts(text)
         root.vhostsLoaded = true
       }
+    }
+  }
+
+  Process {
+    id: cliStatusProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var line = String(text || "").trim().split("\n")[0] || ""
+        var parts = line.split(/\s+/)
+        // STATUS cli installed|missing|stale
+        if (parts.length >= 3 && parts[0] === "STATUS" && parts[1] === "cli")
+          root.cliStatus = parts[2]
+        else
+          root.cliStatus = "missing"
+        root.cliLoaded = true
+      }
+    }
+    onExited: function() {
+      // status exits 1 when missing/stale; still parse stdout above.
+      if (!root.cliLoaded) {
+        root.cliStatus = "missing"
+        root.cliLoaded = true
+      }
+    }
+  }
+
+  Process {
+    id: cliInstallProc
+    stdout: StdioCollector { id: cliInstallOut; waitForEnd: true }
+    stderr: StdioCollector { id: cliInstallErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.busy = false
+      root.setActionLog(cliInstallOut.text, cliInstallErr.text)
+      if (exitCode !== 0) {
+        root.setNotice(Model.clean(cliInstallErr.text || cliInstallOut.text) || "CLI install failed", true)
+        root.refreshCliStatus()
+        return
+      }
+      root.setNotice(Model.clean(cliInstallOut.text) || "web CLI installed", false)
+      root.refreshCliStatus()
     }
   }
 
@@ -818,6 +875,59 @@ Panel {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.runSetup()
+                  }
+                }
+              }
+            }
+
+            // CLI wrappers missing (common after updating the plugin without re-running setup).
+            Rectangle {
+              visible: root.cliNeedsInstall
+              width: parent.width
+              implicitHeight: cliRow.implicitHeight + Style.space(16)
+              radius: Style.cornerRadius
+              color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.08)
+
+              Row {
+                id: cliRow
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(10)
+                anchors.rightMargin: Style.space(10)
+                spacing: Style.space(10)
+
+                Text {
+                  text: root.cliStatus === "stale"
+                    ? "web CLI outdated for this plugin."
+                    : "web CLI not installed (web open)."
+                  color: root.fg
+                  font.family: root.fontName
+                  font.pixelSize: Style.font.bodySmall
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Rectangle {
+                  id: installCliBtn
+                  width: installCliBtnText.implicitWidth + Style.space(18)
+                  height: Style.space(26)
+                  radius: Style.cornerRadius
+                  color: installCliArea.containsMouse ? Style.hoverFillFor(root.fg, Color.accent) : "transparent"
+                  Text {
+                    id: installCliBtnText
+                    anchors.centerIn: parent
+                    text: root.cliStatus === "stale" ? "Reinstall CLI" : "Install CLI"
+                    color: Color.accent
+                    font.family: root.fontName
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
+                  }
+                  MouseArea {
+                    id: installCliArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.installCli()
                   }
                 }
               }
