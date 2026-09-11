@@ -318,10 +318,13 @@ fi
 
 if grep -q 'fpm_sock_for_user' scripts/vhost.sh \
   && grep -q 'omarchweb-%s.sock' scripts/vhost.sh \
-  && grep -q 'prepare_php_vhost' scripts/vhost.sh; then
+  && grep -q 'prepare_php_vhost' scripts/vhost.sh \
+  && grep -q 'unix:/run/php-fpm/omarchweb-\${user}.sock' scripts/root.sh \
+  && grep -q 'render_vhost_conf' scripts/root.sh; then
   ok "vhost PHP sites default to the per-user OmarchWeb pool socket"
 else
-  bad "vhost-fpm-socket" "vhost.sh must use a per-user omarchweb pool socket for PHP sites."
+  bad "vhost-fpm-socket" \
+    "root.sh must render the per-user omarchweb pool socket; vhost.sh must prepare the pool."
 fi
 
 if grep -q 'repair_vhost_fpm_sockets' scripts/root.sh \
@@ -451,10 +454,21 @@ fi
 rm -rf -- "$cli_tmp"
 
 # The vhost document root is the one caller-supplied path root grants ACLs on.
+# Config shape is rendered inside root.sh — never taken from stdin.
+if grep -q 'render_vhost_conf' scripts/root.sh \
+  && grep -q 'kind_ok' scripts/root.sh \
+  && ! grep -nE 'body="\$\(cat\)"|vhost-install.*stdin|conf on stdin' scripts/root.sh \
+  && ! grep -q 'render_block' scripts/vhost.sh \
+  && grep -q 'vhost-install "\$name" "\$kind" "\$host" "\$root"' scripts/vhost.sh; then
+  ok "vhost nginx conf is rendered inside the root-owned helper"
+else
+  bad "vhost-render-in-root" \
+    "root.sh must render allowlisted vhost conf; vhost.sh must not pipe a server block."
+fi
+
 confined=0
 for r in /etc/evil "$PWD/../etc/evil" relative/path; do
-  out="$(printf 'server {\n    root %s;\n}\n' "$r" \
-    | SUDO_UID=0 scripts/root.sh vhost-install probe probe.test 2>&1 || true)"
+  out="$(SUDO_UID=0 scripts/root.sh vhost-install probe php probe.test "$r" 2>&1 || true)"
   if ! printf '%s' "$out" | grep -q 'ERROR: vhost root must'; then
     bad "vhost-docroot" "vhost root '$r' was not refused; got: $out"
     confined=1

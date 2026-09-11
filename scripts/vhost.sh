@@ -10,7 +10,10 @@
 #   OMARCHWEB_WEB_ROOT   base dir for projects           (default: ~/Web)
 #   OMARCHWEB_NGINX_DIR  nginx config dir                (default: /etc/nginx)
 #   OMARCHWEB_PORT       listen port for vhosts          (default: 80)
-#   OMARCHWEB_FPM_SOCK   php-fpm socket (default: per-user OmarchWeb pool)
+#
+# Nginx server blocks are rendered inside the root-owned helper from
+# allowlisted args (name, kind, host, root, port). The FPM socket is
+# derived there from the calling user — never taken from this process.
 #
 # The privileged parts (writing nginx configs, /etc/hosts, reloading nginx)
 # run through the root-owned helper snapshot via passwordless sudo when
@@ -29,7 +32,6 @@ fpm_sock_for_user() {
   printf 'unix:/run/php-fpm/omarchweb-%s.sock' "$u"
 }
 
-FPM_SOCK="${OMARCHWEB_FPM_SOCK:-$(fpm_sock_for_user)}"
 AVAIL="$NGINX_DIR/sites-available"
 ENABLED="$NGINX_DIR/sites-enabled"
 
@@ -39,7 +41,6 @@ ensure_php_fpm_pool() {
 
 prepare_php_vhost() {
   ensure_php_fpm_pool || return 1
-  FPM_SOCK="$(fpm_sock_for_user)"
 }
 
 name_ok() {
@@ -96,33 +97,6 @@ list_vhosts() {
     fi
     printf '%s|%s|%s|%s\n' "$f" "$type" "$host" "$root"
   done
-}
-
-render_block() {
-  local name="$1" type="$2" host="$3" root="$4"
-  local kind="${5:-$type}"
-  cat <<EOF
-# managed by OmarchWeb
-# type $kind
-server {
-    listen $PORT;
-    server_name $host;
-
-    root $root;
-    index index.php index.html;
-
-    location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
-    }
-
-    location ~ \.php$ {
-        fastcgi_pass $FPM_SOCK;
-        fastcgi_index index.php;
-        include fastcgi_params;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-    }
-}
-EOF
 }
 
 # WordPress asks for FTP when PHP-FPM (user http) cannot write, or when it
@@ -344,9 +318,8 @@ add_vhost() {
     fi
   fi
 
-  # Conf goes over stdin so root never reads a predictable /tmp path.
-  if ! render_block "$name" "$nginx_type" "$host" "$root" "$kind" \
-      | omarchweb_elevate vhost-install "$name" "$host"; then
+  # Helper renders the fixed server block from allowlisted args only.
+  if ! omarchweb_elevate vhost-install "$name" "$kind" "$host" "$root" "$PORT"; then
     return 1
   fi
 

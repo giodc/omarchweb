@@ -41,6 +41,22 @@ host_ok() {
   esac
 }
 
+# Site kinds the helper will render. Anything else is refused.
+kind_ok() {
+  case "$1" in
+    php|laravel|wordpress) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Listen port for generated vhosts only.
+port_ok() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
 svc_ok() {
   case "$1" in
     php-fpm|mariadb|nginx|postgresql|redis|mailpit) return 0 ;;
@@ -235,7 +251,7 @@ ensure_nginx_layout() {
 # ACLs on, so confine it to the calling user's home before touching it.
 docroot_ok() {
   local docroot="$1" home="$2"
-  [ -n "$docroot" ] || { echo "ERROR: vhost conf has no root directive" >&2; return 1; }
+  [ -n "$docroot" ] || { echo "ERROR: vhost root must be set" >&2; return 1; }
   [ -n "$home" ] || { echo "ERROR: cannot resolve the calling user's home" >&2; return 1; }
   case "$docroot" in
     /*) ;;
@@ -351,32 +367,62 @@ reload_nginx() {
   fi
 }
 
-vhost_install() {
-  local name="$1" host="$2"
-  local body home docroot write=""
-  name_ok "$name" || { echo "ERROR: invalid vhost name '$name'" >&2; return 1; }
-  host_ok "$host" || { echo "ERROR: invalid host '$host'" >&2; return 1; }
-  body="$(cat)" || { echo "ERROR: missing generated vhost conf on stdin" >&2; return 1; }
-  [ -n "$body" ] || { echo "ERROR: empty vhost conf" >&2; return 1; }
+# Render the fixed OmarchWeb nginx server block. No caller text is interpolated
+# beyond already-validated name/kind/host/root/port and the caller's pool sock.
+render_vhost_conf() {
+  local kind="$1" host="$2" root="$3" port="$4" sock="$5"
+  cat <<EOF
+# managed by OmarchWeb
+# type $kind
+server {
+    listen $port;
+    server_name $host;
 
-  # Validate the document root before anything is written, so a rejected
-  # conf never leaves a half-enabled vhost behind.
+    root $root;
+    index index.php index.html;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php$ {
+        fastcgi_pass $sock;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+    }
+}
+EOF
+}
+
+vhost_install() {
+  local name="$1" kind="$2" host="$3" root="$4" port="${5:-80}"
+  local home user sock write=""
+  name_ok "$name" || { echo "ERROR: invalid vhost name '$name'" >&2; return 1; }
+  kind_ok "$kind" || { echo "ERROR: invalid vhost kind '$kind'" >&2; return 1; }
+  host_ok "$host" || { echo "ERROR: invalid host '$host'" >&2; return 1; }
+  port_ok "$port" || { echo "ERROR: invalid listen port '$port'" >&2; return 1; }
+
   home="$(caller_home)"
-  docroot="$(printf '%s\n' "$body" \
-    | sed -n 's/.*root[[:space:]]*\([^;]*\);.*/\1/p' | tr -d ' ' | head -1)"
-  docroot_ok "$docroot" "$home" || return 1
+  docroot_ok "$root" "$home" || return 1
+  user="$(caller_username)"
+  pool_user_ok "$user" || { echo "ERROR: invalid pool user '$user'" >&2; return 1; }
+  sock="unix:/run/php-fpm/omarchweb-${user}.sock"
 
   ensure_nginx_layout
-  printf '%s\n' "$body" | atomic_replace "$AVAIL/$name"
+  # Config is rendered entirely inside this root-owned snapshot — never from
+  # a caller-supplied server block on stdin.
+  render_vhost_conf "$kind" "$host" "$root" "$port" "$sock" \
+    | atomic_replace "$AVAIL/$name"
   ln -sf "$AVAIL/$name" "$ENABLED/$name"
   if ! grep -Eq "(^|[[:space:]])$host([[:space:]]|$)" /etc/hosts 2>/dev/null; then
     printf '%s\n' "127.0.0.1 $host" >> /etc/hosts
   fi
   repair_vhost_paths "$home"
-  if grep -q '^# type wordpress' "$AVAIL/$name" 2>/dev/null || [ -f "$docroot/wp-load.php" ]; then
+  if [ "$kind" = "wordpress" ] || [ -f "$root/wp-load.php" ]; then
     write="write"
   fi
-  grant_http_access "$docroot" "$write"
+  grant_http_access "$root" "$write"
   reload_nginx
 }
 
@@ -662,8 +708,12 @@ case "${1:-}" in
     echo "OK: php-fpm pool ready for $(caller_username)"
     ;;
   vhost-install)
-    [ "$#" -eq 3 ] || { echo "usage: root.sh vhost-install <name> <host>  (conf on stdin)" >&2; exit 1; }
-    vhost_install "$2" "$3"
+    # name kind host root [port] — config is rendered inside this helper.
+    [ "$#" -eq 5 ] || [ "$#" -eq 6 ] || {
+      echo "usage: root.sh vhost-install <name> <php|laravel|wordpress> <host> <root> [port]" >&2
+      exit 1
+    }
+    vhost_install "$2" "$3" "$4" "$5" "${6:-80}"
     ;;
   vhost-remove)
     [ "$#" -eq 2 ] || { echo "usage: root.sh vhost-remove <name>" >&2; exit 1; }
