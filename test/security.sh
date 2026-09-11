@@ -360,6 +360,96 @@ else
     "vhost.sh open/url + cli.sh install-cli (from setup) are required."
 fi
 
+echo "== CLI wrapper install (marketplace: refuse foreign files, atomic write) =="
+
+if grep -nE 'cat > "\$dest_dir/\$wrapper"|cat > "\$\{?dest_dir' scripts/cli.sh; then
+  bad "cli-blind-truncate" \
+    "install_cli_wrappers still truncates wrappers with cat > (review: atomic write)."
+else
+  ok "CLI install does not blind-truncate with cat >"
+fi
+
+if grep -q 'cli_atomic_write' scripts/cli.sh \
+  && grep -q 'mktemp -p' scripts/cli.sh \
+  && grep -q 'mv -f -- "\$tmp" "\$dest"' scripts/cli.sh \
+  && grep -q '# managed by OmarchWeb' scripts/cli.sh \
+  && grep -q 'refusing to overwrite' scripts/cli.sh; then
+  ok "CLI install uses owned-marker checks and atomic rename"
+else
+  bad "cli-atomic-owned" \
+    "cli.sh must refuse non-owned targets and write via mktemp+fsync+mv."
+fi
+
+cli_tmp="$(mktemp -d "${TMPDIR:-/tmp}/omarchweb-cli.XXXXXX")"
+# Fresh install into an empty bin dir.
+if OMARCHWEB_CLI_BIN_DIR="$cli_tmp" scripts/cli.sh install-cli >/dev/null \
+  && [ -f "$cli_tmp/web" ] && [ ! -L "$cli_tmp/web" ] \
+  && [ -f "$cli_tmp/omarchweb" ] && [ ! -L "$cli_tmp/omarchweb" ] \
+  && grep -q '^# managed by OmarchWeb' "$cli_tmp/web" \
+  && grep -Fq "$ROOT/scripts/cli.sh" "$cli_tmp/web"; then
+  ok "CLI install creates owned regular wrappers"
+else
+  bad "cli-install-fresh" "failed to install wrappers into an empty directory"
+fi
+
+# Reinstall over our own wrappers must succeed (refresh / stale path update).
+if OMARCHWEB_CLI_BIN_DIR="$cli_tmp" scripts/cli.sh install-cli >/dev/null; then
+  ok "CLI install may refresh OmarchWeb-owned wrappers"
+else
+  bad "cli-install-refresh" "refused to replace our own managed wrappers"
+fi
+
+# Legacy unmarked wrappers (pre-# managed marker) must be refreshable.
+legacy_tmp="$(mktemp -d "${TMPDIR:-/tmp}/omarchweb-cli-legacy.XXXXXX")"
+cat > "$legacy_tmp/web" <<EOF
+#!/usr/bin/env bash
+exec $ROOT/scripts/cli.sh "\$@"
+EOF
+cat > "$legacy_tmp/omarchweb" <<EOF
+#!/usr/bin/env bash
+exec $ROOT/scripts/cli.sh "\$@"
+EOF
+chmod 0755 "$legacy_tmp/web" "$legacy_tmp/omarchweb"
+if OMARCHWEB_CLI_BIN_DIR="$legacy_tmp" scripts/cli.sh install-cli >/dev/null \
+  && grep -q '^# managed by OmarchWeb' "$legacy_tmp/web" \
+  && grep -q '^# managed by OmarchWeb' "$legacy_tmp/omarchweb"; then
+  ok "CLI install upgrades legacy unmarked OmarchWeb wrappers"
+else
+  bad "cli-install-legacy" "should replace pre-marker wrappers that exec this plugin's cli.sh"
+fi
+rm -rf -- "$legacy_tmp"
+
+# Unrelated regular file must be refused and left intact.
+printf '%s\n' 'FOREIGN-TOOL' > "$cli_tmp/foreign-bin"
+mv -f "$cli_tmp/web" "$cli_tmp/web.bak" 2>/dev/null || true
+printf '%s\n' 'FOREIGN-TOOL' > "$cli_tmp/web"
+out="$(OMARCHWEB_CLI_BIN_DIR="$cli_tmp" scripts/cli.sh install-cli 2>&1 || true)"
+if printf '%s' "$out" | grep -q 'refusing to overwrite' \
+  && grep -qx 'FOREIGN-TOOL' "$cli_tmp/web"; then
+  ok "CLI install refuses an unrelated regular file"
+else
+  bad "cli-refuse-foreign" "should refuse foreign ~/.local/bin/web; got: $out"
+fi
+rm -f -- "$cli_tmp/web"
+mv -f "$cli_tmp/web.bak" "$cli_tmp/web" 2>/dev/null || true
+
+# Symlink must be refused; linked target must stay untouched.
+precious="$cli_tmp/precious-target"
+printf '%s\n' 'DO-NOT-CLOBBER' > "$precious"
+rm -f -- "$cli_tmp/web"
+ln -s "$(basename -- "$precious")" "$cli_tmp/web"
+out="$(OMARCHWEB_CLI_BIN_DIR="$cli_tmp" scripts/cli.sh install-cli 2>&1 || true)"
+if printf '%s' "$out" | grep -q 'refusing to overwrite' \
+  && [ -L "$cli_tmp/web" ] \
+  && grep -qx 'DO-NOT-CLOBBER' "$precious"; then
+  ok "CLI install refuses a symlink and does not follow it"
+else
+  bad "cli-refuse-symlink" \
+    "should refuse symlink wrappers without touching the target; got: $out"
+fi
+
+rm -rf -- "$cli_tmp"
+
 # The vhost document root is the one caller-supplied path root grants ACLs on.
 confined=0
 for r in /etc/evil "$PWD/../etc/evil" relative/path; do
@@ -381,7 +471,7 @@ else
 fi
 
 bash -n scripts/lib.sh scripts/root.sh scripts/setup.sh scripts/vhost.sh \
-  scripts/pins.sh scripts/db.sh scripts/services.sh test/security.sh
+  scripts/pins.sh scripts/db.sh scripts/services.sh scripts/cli.sh test/security.sh
 ok "bash -n on all scripts"
 
 echo

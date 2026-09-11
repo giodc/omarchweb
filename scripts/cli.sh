@@ -17,18 +17,83 @@ set -u
 
 VHOST="$omarchweb_scripts/vhost.sh"
 
+# True if path is a regular file we own and that OmarchWeb previously wrote
+# (current marked wrappers, or legacy unmarked wrappers from older installs).
+cli_wrapper_is_ours() {
+  local path="$1"
+  # Never treat a symlink as ours — install must not follow it.
+  [ -L "$path" ] && return 1
+  [ -f "$path" ] || return 1
+  [ "$(stat -c '%u' -- "$path")" = "$(id -u)" ] || return 1
+
+  if grep -q '^# managed by OmarchWeb' "$path" 2>/dev/null \
+      && grep -qE '^exec .+/cli\.sh' "$path" 2>/dev/null; then
+    return 0
+  fi
+
+  # Legacy shape (before the managed marker):
+  #   #!/usr/bin/env bash
+  #   exec …/io.github.giodc.omarchweb/scripts/cli.sh "$@"
+  if head -n 1 "$path" | grep -qE '^#!/usr/bin/env bash|^#!/bin/bash' \
+      && grep -qE '^exec .+io\.github\.giodc\.omarchweb/scripts/cli\.sh' "$path" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+# Write stdin over dest: O_EXCL temp in the same directory, fsync, rename.
+# rename(2) replaces a symlink at dest instead of writing through it.
+cli_atomic_write() {
+  local dest="$1"
+  local dir tmp
+  dir="$(dirname -- "$dest")"
+  mkdir -p "$dir" || return 1
+  tmp="$(mktemp -p "$dir" -- ".$(basename -- "$dest").XXXXXX")" || return 1
+  if ! cat > "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! chmod 0755 -- "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! sync -d "$tmp" 2>/dev/null && ! sync "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! mv -f -- "$tmp" "$dest"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  sync -d "$dir" 2>/dev/null || true
+}
+
 install_cli_wrappers() {
   local dest_dir="${OMARCHWEB_CLI_BIN_DIR:-$HOME/.local/bin}"
   local cli="$omarchweb_scripts/cli.sh"
-  local wrapper
+  local wrapper dest
 
+  [ -f "$cli" ] || { echo "ERROR: missing helper $cli" >&2; return 127; }
   mkdir -p "$dest_dir" || return 1
+
   for wrapper in omarchweb web; do
-    cat > "$dest_dir/$wrapper" <<EOF
+    dest="$dest_dir/$wrapper"
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+      if ! cli_wrapper_is_ours "$dest"; then
+        echo "ERROR: refusing to overwrite $dest (not an OmarchWeb-owned CLI wrapper)" >&2
+        echo "ERROR: remove it manually if you want OmarchWeb to install '$wrapper' here" >&2
+        return 1
+      fi
+    fi
+    if ! cli_atomic_write "$dest" <<EOF
 #!/usr/bin/env bash
+# managed by OmarchWeb
 exec $(printf '%q' "$cli") "\$@"
 EOF
-    chmod 0755 "$dest_dir/$wrapper" || return 1
+    then
+      echo "ERROR: failed to install $dest" >&2
+      return 1
+    fi
   done
 
   echo "OK: installed $dest_dir/omarchweb and $dest_dir/web"
@@ -45,12 +110,16 @@ status_cli() {
   local dest_dir="${OMARCHWEB_CLI_BIN_DIR:-$HOME/.local/bin}"
   local cli="$omarchweb_scripts/cli.sh"
   if [ -x "$dest_dir/web" ] && [ -x "$dest_dir/omarchweb" ] \
+      && ! [ -L "$dest_dir/web" ] && ! [ -L "$dest_dir/omarchweb" ] \
+      && grep -q '^# managed by OmarchWeb' "$dest_dir/web" 2>/dev/null \
+      && grep -q '^# managed by OmarchWeb' "$dest_dir/omarchweb" 2>/dev/null \
       && grep -Fq "$cli" "$dest_dir/web" 2>/dev/null \
       && grep -Fq "$cli" "$dest_dir/omarchweb" 2>/dev/null; then
     echo "STATUS cli installed"
     return 0
   fi
-  if [ -e "$dest_dir/web" ] || [ -e "$dest_dir/omarchweb" ]; then
+  if [ -e "$dest_dir/web" ] || [ -L "$dest_dir/web" ] \
+      || [ -e "$dest_dir/omarchweb" ] || [ -L "$dest_dir/omarchweb" ]; then
     echo "STATUS cli stale"
     return 1
   fi
